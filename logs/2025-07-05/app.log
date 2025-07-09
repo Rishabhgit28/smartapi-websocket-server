@@ -1,0 +1,44 @@
+[I 250705 11:36:52 smartConnect:124] in pool
+[E 250705 11:36:53 smartWebSocketV2:948] DataException during search for token for SYMBOL (API Search: EXCHANGE, SYMBOL) in row 17 (Focus List): Couldn't parse the JSON response received from the server: b''. Raw content: Couldn't parse the JSON response received from the server: b'' (Attempt 1)
+[E 250705 11:36:53 smartWebSocketV2:962] Failed to fetch token for SYMBOL (Focus List) after 5 attempts.
+[E 250705 11:36:53 smartWebSocketV2:1006] Token not found for Symbol in row 17 (Focus List). This symbol will be skipped for LTP updates, and not added to excel_symbol_details.
+[E 250705 11:36:54 smartWebSocketV2:948] DataException during search for token for KRISHANA-EQ (API Search: NSE, KRISHANA-EQ) in row 9 (Full Positions): Couldn't parse the JSON response received from the server: b'Access denied because of exceeding access rate'. Raw content: Couldn't parse the JSON response received from the server: b'Access denied because of exceeding access rate' (Attempt 1)
+[E 250705 11:36:59 smartWebSocketV2:948] DataException during search for token for SYMBOL (API Search: EXCHANGE, SYMBOL) in row 17 (Full Positions): Couldn't parse the JSON response received from the server: b'Access denied because of exceeding access rate'. Raw content: Couldn't parse the JSON response received from the server: b'Access denied because of exceeding access rate' (Attempt 1)
+[E 250705 11:37:01 smartWebSocketV2:948] DataException during search for token for SYMBOL (API Search: EXCHANGE, SYMBOL) in row 17 (Full Positions): Couldn't parse the JSON response received from the server: b''. Raw content: Couldn't parse the JSON response received from the server: b'' (Attempt 2)
+[E 250705 11:37:01 smartWebSocketV2:962] Failed to fetch token for SYMBOL (Full Positions) after 5 attempts.
+[E 250705 11:37:01 smartWebSocketV2:1006] Token not found for Symbol in row 17 (Full Positions). This symbol will be skipped for LTP updates, and not added to excel_symbol_details.
+[E 250705 11:37:02 smartWebSocketV2:948] DataException during search for token for GOLD05AUG25FUT (API Search: MCX, GOLD05AUG25FUT) in row 18 (Full Positions): Couldn't parse the JSON response received from the server: b'Access denied because of exceeding access rate'. Raw content: Couldn't parse the JSON response received from the server: b'Access denied because of exceeding access rate' (Attempt 1)
+[E 250705 11:37:05 smartWebSocketV2:945] Failed to fetch scrip search data for 'SILVER04JUL25FUT' (Full Positions). Response empty/malformed (Attempt 1). Search Response: {'status': True, 'message': 'SUCCESS', 'errorcode': '', 'data': []}
+[E 250705 11:37:08 smartWebSocketV2:945] Failed to fetch scrip search data for 'SILVER04JUL25FUT' (Full Positions). Response empty/malformed (Attempt 2). Search Response: {'status': True, 'message': 'SUCCESS', 'errorcode': '', 'data': []}
+[E 250705 11:37:12 smartWebSocketV2:945] Failed to fetch scrip search data for 'SILVER04JUL25FUT' (Full Positions). Response empty/malformed (Attempt 3). Search Response: {'status': True, 'message': 'SUCCESS', 'errorcode': '', 'data': []}
+[E 250705 11:37:17 smartWebSocketV2:945] Failed to fetch scrip search data for 'SILVER04JUL25FUT' (Full Positions). Response empty/malformed (Attempt 4). Search Response: {'status': True, 'message': 'SUCCESS', 'errorcode': '', 'data': []}
+[E 250705 11:37:24 smartWebSocketV2:945] Failed to fetch scrip search data for 'SILVER04JUL25FUT' (Full Positions). Response empty/malformed (Attempt 5). Search Response: {'status': True, 'message': 'SUCCESS', 'errorcode': '', 'data': []}
+[E 250705 11:37:24 smartWebSocketV2:962] Failed to fetch token for SILVER04JUL25FUT (Full Positions) after 5 attempts.
+[E 250705 11:37:24 smartWebSocketV2:1006] Token not found for SILVER04JUL25FUT in row 19 (Full Positions). This symbol will be skipped for LTP updates, and not added to excel_symbol_details.
+[E 250705 11:37:25 smartWebSocketV2:948] DataException during search for token for SYMBOL (API Search: EXCHANGE, SYMBOL) in row 26 (Indices): Couldn't parse the JSON response received from the server: b''. Raw content: Couldn't parse the JSON response received from the server: b'' (Attempt 1)
+[E 250705 11:37:25 smartWebSocketV2:962] Failed to fetch token for SYMBOL (Indices) after 5 attempts.
+[E 250705 11:37:25 smartWebSocketV2:1006] Token not found for Symbol in row 26 (Indices). This symbol will be skipped for LTP updates, and not added to excel_symbol_details.
+[E 250705 11:37:25 smartWebSocketV2:948] DataException during search for token for SYMBOL (API Search: EXCHANGE, SYMBOL) in row 26 (Quarter Positions): Couldn't parse the JSON response received from the server: b'Access denied because of exceeding access rate'. Raw content: Couldn't parse the JSON response received from the server: b'Access denied because of exceeding access rate' (Attempt 1)
+[E 250705 11:37:27 smartWebSocketV2:948] DataException during search for token for SYMBOL (API Search: EXCHANGE, SYMBOL) in row 26 (Quarter Positions): Couldn't parse the JSON response received from the server: b''. Raw content: Couldn't parse the JSON response received from the server: b'' (Attempt 2)
+[E 250705 11:37:27 smartWebSocketV2:962] Failed to fetch token for SYMBOL (Quarter Positions) after 5 attempts.
+[E 250705 11:37:27 smartWebSocketV2:1006] Token not found for Symbol in row 26 (Quarter Positions). This symbol will be skipped for LTP updates, and not added to excel_symbol_details.
+[E 250705 11:37:40 smartWebSocketV2:1229] An unexpected error occurred in the Excel update phase: (-2146777998, 'OLE error 0x800ac472', None, None)
+    Traceback (most recent call last):
+      File "smartWebSocketV2.py", line 1150, in update_excel_live_data
+        if details.get("orh_setup_col"): # Only clear if this column was configured for this entry
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "xlwings\main.py", line 2268, in number_format
+      File "xlwings\_xlwindows.py", line 1328, in number_format
+      File "xlwings\_xlwindows.py", line 161, in __setattr__
+      File "win32com\client\__init__.py", line 600, in __setattr__
+    pywintypes.com_error: (-2146777998, 'OLE error 0x800ac472', None, None)
+[E 250705 11:37:50 smartWebSocketV2:1229] An unexpected error occurred in the Excel update phase: (-2146777998, 'OLE error 0x800ac472', None, None)
+    Traceback (most recent call last):
+      File "smartWebSocketV2.py", line 1150, in update_excel_live_data
+        if details.get("orh_setup_col"): # Only clear if this column was configured for this entry
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "xlwings\main.py", line 2268, in number_format
+      File "xlwings\_xlwindows.py", line 1328, in number_format
+      File "xlwings\_xlwindows.py", line 161, in __setattr__
+      File "win32com\client\__init__.py", line 600, in __setattr__
+    pywintypes.com_error: (-2146777998, 'OLE error 0x800ac472', None, None)

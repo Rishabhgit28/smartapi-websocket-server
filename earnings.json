@@ -1,0 +1,380 @@
+[
+  {
+    "name": "Scoda Tubes",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "124",
+    "net": "7",
+    "revGrowth": "-4%",
+    "netGrowth": "-30%"
+  },
+  {
+    "name": "Prostarm Info",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "78",
+    "net": "7",
+    "revGrowth": "2%",
+    "netGrowth": "-12%"
+  },
+  {
+    "name": "Aegis Logistics",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "1,705",
+    "net": "318",
+    "revGrowth": "-0.12%",
+    "netGrowth": "98%"
+  },
+  {
+    "name": "Orissa Minerals",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "7",
+    "net": "-31",
+    "revGrowth": "-66%",
+    "netGrowth": "-342%"
+  },
+  {
+    "name": "Belrise Ind",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "1,799",
+    "net": "110",
+    "revGrowth": "1%",
+    "netGrowth": "20%"
+  },
+  {
+    "name": "Vipul",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "44",
+    "net": "-35",
+    "revGrowth": "300%",
+    "netGrowth": "-975%"
+  },
+  {
+    "name": "Libas Consumer",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "31",
+    "net": "1",
+    "revGrowth": "40%",
+    "netGrowth": "200%"
+  },
+  {
+    "name": "Borana Weaves",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "79",
+    "net": "11",
+    "revGrowth": "0.00%",
+    "netGrowth": "0.00%"
+  },
+  {
+    "name": "Kore Digital",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "10",
+    "net": "-1",
+    "revGrowth": "-66%",
+    "netGrowth": "-133%"
+  },
+  {
+    "name": "Agro Phos India",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "30",
+    "net": "3",
+    "revGrowth": "30%",
+    "netGrowth": "50%"
+  },
+  {
+    "name": "Bajaj Holdings",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "145",
+    "net": "143",
+    "revGrowth": "15%",
+    "netGrowth": "62%"
+  },
+  {
+    "name": "Apollo Hospital",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "5,592",
+    "net": "404",
+    "revGrowth": "1%",
+    "netGrowth": "8%"
+  },
+  {
+    "name": "Vodafone Idea",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "11,014",
+    "net": "-7,168",
+    "revGrowth": "-0.93%",
+    "netGrowth": "-8%"
+  },
+  {
+    "name": "FSN E-Co Nykaa",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "89",
+    "net": "15",
+    "revGrowth": "-25%",
+    "netGrowth": "-37%"
+  },
+  {
+    "name": "Inox Wind",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "1,275",
+    "net": "190",
+    "revGrowth": "39%",
+    "netGrowth": "69%"
+  },
+  {
+    "name": "Sun TV Network",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "941",
+    "net": "386",
+    "revGrowth": "13%",
+    "netGrowth": "8%"
+  },
+  {
+    "name": "PTC Industries",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "122",
+    "net": "25",
+    "revGrowth": "82%",
+    "netGrowth": "78%"
+  },
+  {
+    "name": "AstraZeneca",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "480",
+    "net": "58",
+    "revGrowth": "9%",
+    "netGrowth": "87%"
+  },
+  {
+    "name": "Swan Energy",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "856",
+    "net": "-22",
+    "revGrowth": "-55%",
+    "netGrowth": "-103%"
+  },
+  {
+    "name": "TITAGARH",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "1,006",
+    "net": "73",
+    "revGrowth": "11%",
+    "netGrowth": "5%"
+  },
+  {
+    "name": "Valor Estate",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "645",
+    "net": "-4",
+    "revGrowth": "95%",
+    "netGrowth": "-157%"
+  },
+  {
+    "name": "Ingersoll Rand",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "322",
+    "net": "68",
+    "revGrowth": "-16%",
+    "netGrowth": "-12%"
+  },
+  {
+    "name": "RamkrishnaForge",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "947",
+    "net": "200",
+    "revGrowth": "-11%",
+    "netGrowth": "100%"
+  },
+  {
+    "name": "Genus Power",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "937",
+    "net": "119",
+    "revGrowth": "55%",
+    "netGrowth": "147%"
+  },
+  {
+    "name": "PNC Infratech",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "1,704",
+    "net": "75",
+    "revGrowth": "15%",
+    "netGrowth": "-7%"
+  },
+  {
+    "name": "Diamond Power",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "334",
+    "net": "8",
+    "revGrowth": "8%",
+    "netGrowth": "33%"
+  },
+  {
+    "name": "Puravankara",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "542",
+    "net": "-88",
+    "revGrowth": "70%",
+    "netGrowth": "3%"
+  },
+  {
+    "name": "Ahluwalia",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "1,216",
+    "net": "83",
+    "revGrowth": "27%",
+    "netGrowth": "69%"
+  },
+  {
+    "name": "Greenlam Ind",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "682",
+    "net": "1",
+    "revGrowth": "13%",
+    "netGrowth": "-92%"
+  },
+  {
+    "name": "Indo Count",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "1,023",
+    "net": "11",
+    "revGrowth": "-11%",
+    "netGrowth": "-85%"
+  },
+  {
+    "name": "Inox Green",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "57",
+    "net": "13",
+    "revGrowth": "11%",
+    "netGrowth": "8%"
+  },
+  {
+    "name": "India Tourism D",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "200",
+    "net": "25",
+    "revGrowth": "34%",
+    "netGrowth": "19%"
+  },
+  {
+    "name": "FIEM Ind",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "639",
+    "net": "59",
+    "revGrowth": "7%",
+    "netGrowth": "25%"
+  },
+  {
+    "name": "NFL",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "4,457",
+    "net": "97",
+    "revGrowth": "-23%",
+    "netGrowth": "212%"
+  },
+  {
+    "name": "Rolex Rings",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "284",
+    "net": "55",
+    "revGrowth": "9%",
+    "netGrowth": "175%"
+  },
+  {
+    "name": "Ashapura Mine",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "555",
+    "net": "76",
+    "revGrowth": "-35%",
+    "netGrowth": "-24%"
+  },
+  {
+    "name": "Sindhu Trade",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "297",
+    "net": "-65",
+    "revGrowth": "-41%",
+    "netGrowth": "-828%"
+  },
+  {
+    "name": "Jamna Auto",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "638",
+    "net": "50",
+    "revGrowth": "13%",
+    "netGrowth": "13%"
+  },
+  {
+    "name": "Easy Trip",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "88",
+    "net": "6",
+    "revGrowth": "-16%",
+    "netGrowth": "-82%"
+  },
+  {
+    "name": "Gufic Bio",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "205",
+    "net": "8",
+    "revGrowth": "-1%",
+    "netGrowth": "-57%"
+  },
+  {
+    "name": "Ashiana Housing",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "218",
+    "net": "20",
+    "revGrowth": "63%",
+    "netGrowth": "81%"
+  },
+  {
+    "name": "TCPL Packaging",
+    "period": "Q4 FY24-25",
+    "date": "",
+    "revenue": "422",
+    "net": "38",
+    "revGrowth": "-12%",
+    "netGrowth": "0.00%"
+  }
+]
