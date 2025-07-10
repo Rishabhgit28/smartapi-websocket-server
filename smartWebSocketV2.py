@@ -560,7 +560,11 @@ totp_secret = "QHO5IWOISV56Z2BFTPFSRSQVRQ"
 # ---------------------------------------------------------------
 
 # --- Google Sheets Configuration ---
-JSON_KEY_FILE_PATH = r"C:\Users\Infin\Setup\Market Dashboard Shareable\the-money-method-ad6d7-f95331cf5cbf.json"
+if os.path.exists("/etc/secrets/creds.json"):
+    JSON_KEY_FILE_PATH = "/etc/secrets/creds.json"
+else:
+    JSON_KEY_FILE_PATH = os.path.join(os.path.dirname(__file__), "the-money-method-ad6d7-f95331cf5cbf.json")
+
 GOOGLE_SHEET_ID = "1cYBpsVKCbrYCZzrj8NAMEgUG4cXy5Q5r9BtQE1Cjmz0" # Your Google Sheet ID
 GOOGLE_SHEET_NAME = "MarketDashboard"
 DASHBOARD_SHEET_NAME = "Dashboard"
