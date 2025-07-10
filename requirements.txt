@@ -4,5 +4,5 @@ logzero
 requests
 gspread
 oauth2client
-SmartApi
 pycryptodome
+git+https://github.com/angel-one/smartapi-python.git
