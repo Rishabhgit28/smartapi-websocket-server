@@ -6,3 +6,4 @@ gspread
 oauth2client
 pycryptodome
 git+https://github.com/angel-one/smartapi-python.git
+flask
