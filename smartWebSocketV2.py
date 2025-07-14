@@ -111,7 +111,7 @@ CREDENTIAL_SHEET_NAME = "Credential"
 # Path to your service account JSON key file
 # For deployment, check /etc/secrets/creds.json
 if os.path.exists("/etc/secrets/creds.json"):
-    JSON_KEY_FILE_PATH = "/etc/secrets/cres.json" # Typo corrected: creds.json
+    JSON_KEY_FILE_PATH = "/etc/secrets/creds.json" # Typo corrected: creds.json
 else:
     # Fallback for local development/testing
     JSON_KEY_FILE_PATH = os.path.join(os.path.dirname(__file__), "the-money-method-ad6d7-f95331cf5cbf.json")
