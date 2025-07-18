@@ -16,6 +16,7 @@ import logging
 import threading
 import collections
 import datetime
+import re
 from datetime import timedelta
 
 # --- Flask for Web Service Deployment ---
@@ -138,8 +139,7 @@ excel_setup_details = collections.defaultdict(list) # For ORH symbols
 excel_3pct_setup_details = collections.defaultdict(list) # For 3% Down symbols
 interval_ohlc_data = collections.defaultdict(lambda: collections.defaultdict(dict))
 completed_3min_candles = collections.defaultdict(list)
-latest_completed_candles_3pct = collections.defaultdict(lambda: collections.defaultdict(dict))
-# MODIFIED: This now stores the last 10 full candle data for high volume analysis
+# MODIFIED: This now stores a large history of candles for analysis.
 volume_history_3pct = collections.defaultdict(lambda: collections.defaultdict(list))
 previous_day_high_cache = {}
 twenty_five_day_high_cache = {} # NEW: Cache for the new "% from High" setup
@@ -179,9 +179,9 @@ FULL_RETURN_AMT_COL = 'Q'
 FULL_RETURN_PCT_COL = 'R'
 FULL_ENTRY_DATE_COL = 'T'
 FULL_DAYS_DURATION_COL = 'U'
-FULL_SWING_LOW_COL = 'X'
-FULL_MOVE_PCT_COL = 'Y'
-FULL_PERCENT_FROM_HIGH_COL = 'Z' # MODIFIED: Renamed for clarity, still points to Column AA
+HIGHEST_UP_CANDLE_COL = 'X' 
+HIGHEST_UP_CANDLE_STATUS_COL = 'Y' # NEW: Confirmation for Highest Up Candle
+FULL_PERCENT_FROM_HIGH_COL = 'Z'
 INDEX_EXCHANGE_COL = 'B'
 INDEX_SYMBOL_COL = 'C'
 INDEX_LTP_COL = 'D'
@@ -201,8 +201,10 @@ PCT_EXCHANGE_COL_3PCT = 'L'
 PCT_SYMBOL_COL_3PCT = 'M'
 PCT_TOKEN_COL_3PCT = 'Z' # This column is shared with ATH_CACHE_Z_COL_DASH
 PCT_DOWN_RESULT_COL = 'AA'
-# MODIFIED: This column is now for the separate High Volume setup
-PCT_DOWN_CONFIRM_COL = 'AC'
+PCT_DOWN_STATUS_COL = 'AB'      # NEW: Confirmation for 3% Down
+HIGH_VOL_RESULT_COL = 'AC'      # RENAMED for clarity
+HIGH_VOL_STATUS_COL = 'AD'      # NEW: Confirmation for High Volume
+
 CANDLE_INTERVALS_3PCT_API = ['FIFTEEN_MINUTE', 'THIRTY_MINUTE', 'ONE_HOUR']
 CANDLE_INTERVAL_MAP_DISPLAY = {
     'FIFTEEN_MINUTE': '15 Min',
@@ -663,17 +665,23 @@ def fetch_25_day_high(smart_api_obj, symbols_to_fetch):
         time.sleep(0.4) # Add delay to prevent rate limiting
 
 
-def fetch_historical_candles_for_3pct_down(smart_api_obj, tokens_to_fetch, interval_api, from_dt, to_dt):
+# MODIFIED: This function now fetches data from the previous week's Monday.
+def fetch_historical_candles_for_3pct_down(smart_api_obj, tokens_to_fetch, interval_api):
     """
-    MODIFIED: Fetches historical candles for price/volume setups.
-    It now populates both the latest candle and the full history of the last 10 candles.
+    Fetches historical data for price/volume setups from the previous week's Monday to now.
     """
-    logger.info(f"Fetching historical {interval_api} candles from {from_dt:%Y-%m-%d %H:%M} to {to_dt:%Y-%m-%d %H:%M}...")
-    TARGET_CANDLES = 10
-    interval_minutes_map = {"FIFTEEN_MINUTE": 15, "THIRTY_MINUTE": 30, "ONE_HOUR": 60}
-    minutes_back = interval_minutes_map.get(interval_api, 15) * (TARGET_CANDLES + 5) # Fetch a bit more to be safe
-    adjusted_from_dt = to_dt - datetime.timedelta(minutes=minutes_back)
-    from_date_str, to_date_str = adjusted_from_dt.strftime("%Y-%m-%d %H:%M"), to_dt.strftime("%Y-%m-%d %H:%M")
+    # NEW: Calculate the start date as the Monday of the previous week.
+    today = datetime.date.today()
+    # today.weekday() is 0 for Monday, 6 for Sunday.
+    # We go back to the previous Monday by subtracting the current weekday + 7 days.
+    days_to_last_monday = today.weekday() + 7
+    from_dt = datetime.datetime.combine(today - timedelta(days=days_to_last_monday), datetime.time.min)
+    to_dt = datetime.datetime.now()
+    
+    from_date_str = from_dt.strftime("%Y-%m-%d %H:%M")
+    to_date_str = to_dt.strftime("%Y-%m-%d %H:%M")
+    
+    logger.info(f"Fetching {interval_api} candles from {from_date_str} to {to_date_str}...")
 
     with data_lock:
         setup_details_copy = excel_3pct_setup_details.copy()
@@ -682,41 +690,37 @@ def fetch_historical_candles_for_3pct_down(smart_api_obj, tokens_to_fetch, inter
         token, exchange_type = token_info[0], token_info[1]
         symbol_name = setup_details_copy.get(token, [{}])[0].get('symbol', 'Unknown')
         exchange_str = {1: "NSE", 3: "BSE"}.get(exchange_type)
-        if not exchange_str: logger.warning(f"Cannot fetch history for token {token}, unknown exchange type {exchange_type}"); time.sleep(1); continue
+        if not exchange_str: 
+            logger.warning(f"Cannot fetch history for token {token}, unknown exchange type {exchange_type}")
+            time.sleep(1)
+            continue
 
-        candle_data, fetch_attempts = [], 0
-        while len(candle_data) < TARGET_CANDLES and fetch_attempts < 5:
-            try:
-                historic_param = {"exchange": exchange_str, "symboltoken": token, "interval": interval_api, "fromdate": from_date_str, "todate": to_date_str}
-                response = smart_api_obj.getCandleData(historic_param)
-                if response and response.get("status") and response.get("data"):
-                    candle_data = response["data"]
-                    if len(candle_data) < TARGET_CANDLES:
-                        adjusted_from_dt -= datetime.timedelta(minutes=minutes_back)
-                        from_date_str = adjusted_from_dt.strftime("%Y-%m-%d %H:%M")
-                        fetch_attempts += 1; time.sleep(0.5); continue
-                    break # Exit loop if we have enough data
-                else: logger.warning(f"Fetch error for {symbol_name}. Message: {response.get('message', 'Unknown error')}"); break
-            except Exception as e: logger.error(f"Exception fetching data for {symbol_name}: {e}"); break
+        try:
+            historic_param = {"exchange": exchange_str, "symboltoken": token, "interval": interval_api, "fromdate": from_date_str, "todate": to_date_str}
+            response = smart_api_obj.getCandleData(historic_param)
+            
+            if response and response.get("status") and response.get("data"):
+                candle_data = response["data"]
+                
+                # Store the full history for analysis
+                candle_history = []
+                for c in candle_data:
+                    candle_history.append({
+                        'start_time': datetime.datetime.fromisoformat(c[0]), 'open': c[1], 'high': c[2], 
+                        'low': c[3], 'close': c[4], 'volume': c[5] if len(c) > 5 else 0
+                    })
+                
+                with data_lock:
+                    volume_history_3pct[token][interval_api] = candle_history
+                
+                logger.info(f"✅ Fetched {len(candle_history)} candles for {symbol_name} ({interval_api}).")
+            else:
+                logger.warning(f"Fetch error for {symbol_name} ({interval_api}). Message: {response.get('message', 'Unknown error')}")
+        except Exception as e:
+            logger.error(f"Exception fetching data for {symbol_name} ({interval_api}): {e}")
+        
+        time.sleep(0.5) # Add delay between each symbol fetch to avoid rate limiting
 
-        if len(candle_data) >= 1:
-            # MODIFIED: Store the last 10 full candles for high volume analysis
-            candle_history = []
-            for c in candle_data[-TARGET_CANDLES:]:
-                candle_history.append({
-                    'start_time': datetime.datetime.fromisoformat(c[0]), 'open': c[1], 'high': c[2], 
-                    'low': c[3], 'close': c[4], 'volume': c[5] if len(c) > 5 else 0
-                })
-            volume_history_3pct[token][interval_api] = candle_history
-            
-            # Store the single latest completed candle for the 3% down check
-            latest_candle_dict = candle_history[-1]
-            latest_completed_candles_3pct[token][interval_api] = latest_candle_dict
-            
-            logger.info(f"✅ Fetched latest {CANDLE_INTERVAL_MAP_DISPLAY.get(interval_api, interval_api)} candle for {symbol_name}: O={latest_candle_dict['open']:.2f}, H={latest_candle_dict['high']:.2f}, L={latest_candle_dict['low']:.2f}, C={latest_candle_dict['close']:.2f}, V={latest_candle_dict.get('volume', 'N/A')}")
-        else:
-            logger.warning(f"❌ Not enough candle data for {symbol_name} (Token: {token}) for interval {interval_api} even after multiple attempts.")
-        time.sleep(0.4) # Add delay between each symbol fetch to avoid rate limiting
 
 def check_and_update_orh_setup():
     """Checks the latest completed 3-min candle for ORH setup and updates Google Sheet."""
@@ -772,132 +776,196 @@ def check_and_update_orh_setup():
     else:
         logger.info("ℹ️ No ORH setup updates needed.")
 
-# MODIFIED: This function now contains the new conditional logic for the high volume setup.
+# MODIFIED: This function has been significantly updated with the new logic for all setups.
 def check_and_update_price_volume_setups():
     """
-    Checks for 3% down and high volume setups, applying conditional logic for the high volume output.
-    - 3% Down (Col AA): Shows low price of any candle that drops >= 3%.
-    - High Volume (Col AC): Shows low price based on a multi-conditional analysis of high-volume candles.
+    Checks for 3% down, high volume, and highest up candle setups based on extended historical data.
     """
-    logger.info("🔍 Checking for 3% Down and High Volume setups...")
+    logger.info("🔍 Checking for Price/Volume setups...")
     updates_queued = []
     
     pct_down_result_col_values = Dashboard.col_values(col_to_num(PCT_DOWN_RESULT_COL))
-    high_volume_result_col_values = Dashboard.col_values(col_to_num(PCT_DOWN_CONFIRM_COL))
+    high_volume_result_col_values = Dashboard.col_values(col_to_num(HIGH_VOL_RESULT_COL))
+    highest_up_col_values = Dashboard.col_values(col_to_num(HIGHEST_UP_CANDLE_COL))
 
     with data_lock:
         setup_details_copy = excel_3pct_setup_details.copy()
+        volume_history_copy = volume_history_3pct.copy()
 
     for token, symbol_entries in setup_details_copy.items():
         symbol_name = symbol_entries[0]['symbol']
         
-        final_output_3_pct = []
+        three_pct_down_candles = {}
         high_vol_candles = {}
+        # NEW: Variables for Highest Up Candle setup
+        highest_up_candle = None
+        highest_up_candle_interval_api = None
+        max_gain = -1 # Start with a negative number to ensure any gain is higher
 
-        # --- Phase 1: Gather data for all timeframes ---
+        # --- Phase 1: Analyze historical data for all timeframes ---
         for interval_api in CANDLE_INTERVALS_3PCT_API:
-            # 3% Down Logic
-            latest_candle = latest_completed_candles_3pct.get(token, {}).get(interval_api)
-            if latest_candle and latest_candle.get('open', 0) > 0:
-                open_price, close_price, low_price = latest_candle['open'], latest_candle['close'], latest_candle['low']
-                if (open_price - close_price) / open_price >= 0.03:
-                    interval_display_name = CANDLE_INTERVAL_MAP_DISPLAY.get(interval_api)
-                    final_output_3_pct.append(f"{low_price:.2f}({interval_display_name})")
-                    logger.info(f"📉 3% Down Triggered for {symbol_name} ({interval_display_name}) ➤ Low={low_price:.2f}")
+            candle_history = volume_history_copy.get(token, {}).get(interval_api)
 
-            # High Volume Data Gathering
-            candle_history = volume_history_3pct.get(token, {}).get(interval_api)
-            if candle_history:
-                highest_volume_candle = max(candle_history, key=lambda c: c.get('volume', 0))
-                high_vol_candles[interval_api] = highest_volume_candle
-        
-        # --- Phase 2: Apply new conditional logic for High Volume output ---
-        final_output_high_vol = ""
-        
-        c_1h = high_vol_candles.get('ONE_HOUR')
-        c_30m = high_vol_candles.get('THIRTY_MINUTE')
-        c_15m = high_vol_candles.get('FIFTEEN_MINUTE')
+            if not candle_history:
+                continue
 
-        available_candles = [c for c in [c_1h, c_30m, c_15m] if c]
-        
-        if len(available_candles) > 0:
-            lows = [c['low'] for c in available_candles]
+            # --- Find representative candle for 3% Down setup ---
+            triggered_3pct_candles = []
+            for candle in candle_history:
+                high_price, close_price = candle.get('high', 0), candle.get('close', 0)
+                if high_price > 0 and (high_price - close_price) / high_price >= 0.03:
+                    triggered_3pct_candles.append(candle)
             
-            # Condition 1: All available lows are identical
-            if len(set(lows)) == 1:
-                # Default to highest timeframe candle if lows are the same
-                selected_candle = available_candles[0] # Start with any
-                if c_1h and c_1h in available_candles: selected_candle = c_1h
-                elif c_30m and c_30m in available_candles: selected_candle = c_30m
-                
-                interval_api = next(key for key, val in high_vol_candles.items() if val == selected_candle)
-                interval_name = CANDLE_INTERVAL_MAP_DISPLAY[interval_api]
-                final_output_high_vol = f"{selected_candle['low']:.2f}({interval_name})"
-                logger.info(f"📈 High Vol (Cond 1) for {symbol_name}: Identical lows, selected {interval_name}.")
+            if triggered_3pct_candles:
+                lowest_low_candle = min(triggered_3pct_candles, key=lambda c: c['low'])
+                three_pct_down_candles[interval_api] = lowest_low_candle
 
+            # --- Find representative candle for High Volume setup ---
+            highest_volume_candle = max(candle_history, key=lambda c: c.get('volume', 0))
+            high_vol_candles[interval_api] = highest_volume_candle
+
+            # --- Find representative candle for Highest Up Candle setup ---
+            for candle in candle_history:
+                open_price, close_price = candle.get('open', 0), candle.get('close', 0)
+                if open_price > 0:
+                    gain = (close_price - open_price) / open_price
+                    if gain > max_gain:
+                        max_gain = gain
+                        highest_up_candle = candle
+                        highest_up_candle_interval_api = interval_api
+        
+        # --- Phase 2: Apply conditional logic for 3% DOWN output (Column AA) ---
+        final_output_3_pct = ""
+        c_1h_3pct = three_pct_down_candles.get('ONE_HOUR')
+        c_30m_3pct = three_pct_down_candles.get('THIRTY_MINUTE')
+        c_15m_3pct = three_pct_down_candles.get('FIFTEEN_MINUTE')
+        
+        available_candles_3pct = [c for c in [c_1h_3pct, c_30m_3pct, c_15m_3pct] if c]
+
+        if len(available_candles_3pct) > 0:
+            lows = [c['low'] for c in available_candles_3pct]
+            if len(set(lows)) == 1:
+                selected_candle = c_1h_3pct if c_1h_3pct else c_30m_3pct if c_30m_3pct else c_15m_3pct
+                interval_api = next(key for key, val in three_pct_down_candles.items() if val == selected_candle)
+                interval_name = CANDLE_INTERVAL_MAP_DISPLAY[interval_api]
+                time_str = selected_candle['start_time'].strftime('%H:%M')
+                final_output_3_pct = f"{selected_candle['low']:.2f}({interval_name}, {time_str})"
             else:
                 min_low, max_low = min(lows), max(lows)
-                
-                # Condition 2: Lows are "close" (within 2% difference)
-                if min_low > 0 and (max_low - min_low) / min_low <= 0.02:
-                    lowest_price_candle = min(available_candles, key=lambda c: c['low'])
-                    interval_api = next(key for key, val in high_vol_candles.items() if val == lowest_price_candle)
+                if min_low > 0 and (max_low - min_low) / min_low <= 0.01: # Using 1% threshold
+                    lowest_price_candle = min(available_candles_3pct, key=lambda c: c['low'])
+                    interval_api = next(key for key, val in three_pct_down_candles.items() if val == lowest_price_candle)
                     interval_name = CANDLE_INTERVAL_MAP_DISPLAY[interval_api]
-                    final_output_high_vol = f"{lowest_price_candle['low']:.2f}({interval_name})"
-                    logger.info(f"📈 High Vol (Cond 2) for {symbol_name}: Lows within 2%, selected lowest: {lowest_price_candle['low']:.2f}({interval_name}).")
-                
-                # Condition 3: Lows are "far apart" (more than 2% difference)
+                    time_str = lowest_price_candle['start_time'].strftime('%H:%M')
+                    final_output_3_pct = f"{lowest_price_candle['low']:.2f}({interval_name}, {time_str})"
                 else:
                     output_parts = []
-                    
-                    def check_pair(c1, c2, name1, name2):
+                    def check_pair(c1, c2, name1, name2, threshold):
                         if c1 and c2:
                             low1, low2 = c1['low'], c2['low']
-                            # Ensure we don't divide by zero
-                            if min(low1, low2) > 0 and abs(low1 - low2) / min(low1, low2) > 0.02:
-                                return [f"{low1:.2f}({name1})", f"{low2:.2f}({name2})"]
+                            if min(low1, low2) > 0 and abs(low1 - low2) / min(low1, low2) > threshold:
+                                time1 = c1['start_time'].strftime('%H:%M')
+                                time2 = c2['start_time'].strftime('%H:%M')
+                                return [f"{low1:.2f}({name1}, {time1})", f"{low2:.2f}({name2}, {time2})"]
+                        return None
+                    
+                    pair_result = check_pair(c_1h_3pct, c_30m_3pct, '1 Hour', '30 Min', 0.01)
+                    if pair_result: output_parts = pair_result
+                    elif not pair_result:
+                        pair_result = check_pair(c_1h_3pct, c_15m_3pct, '1 Hour', '15 Min', 0.01)
+                        if pair_result: output_parts = pair_result
+                    elif not pair_result:
+                        pair_result = check_pair(c_30m_3pct, c_15m_3pct, '30 Min', '15 Min', 0.01)
+                        if pair_result: output_parts = pair_result
+
+                    if output_parts:
+                        final_output_3_pct = ", ".join(sorted(output_parts, reverse=True))
+                    else:
+                        lowest_price_candle = min(available_candles_3pct, key=lambda c: c['low'])
+                        interval_api = next(key for key, val in three_pct_down_candles.items() if val == lowest_price_candle)
+                        interval_name = CANDLE_INTERVAL_MAP_DISPLAY[interval_api]
+                        time_str = lowest_price_candle['start_time'].strftime('%H:%M')
+                        final_output_3_pct = f"{lowest_price_candle['low']:.2f}({interval_name}, {time_str})"
+
+
+        # --- Phase 3: Apply conditional logic for HIGH VOLUME output (Column AC) ---
+        final_output_high_vol = ""
+        c_1h_hv = high_vol_candles.get('ONE_HOUR')
+        c_30m_hv = high_vol_candles.get('THIRTY_MINUTE')
+        c_15m_hv = high_vol_candles.get('FIFTEEN_MINUTE')
+
+        available_candles_hv = [c for c in [c_1h_hv, c_30m_hv, c_15m_hv] if c]
+        
+        if len(available_candles_hv) > 0:
+            lows = [c['low'] for c in available_candles_hv]
+            if len(set(lows)) == 1:
+                selected_candle = c_1h_hv if c_1h_hv else c_30m_hv if c_30m_hv else c_15m_hv
+                interval_api = next(key for key, val in high_vol_candles.items() if val == selected_candle)
+                interval_name = CANDLE_INTERVAL_MAP_DISPLAY[interval_api]
+                time_str = selected_candle['start_time'].strftime('%H:%M')
+                final_output_high_vol = f"{selected_candle['low']:.2f}({interval_name}, {time_str})"
+            else:
+                min_low, max_low = min(lows), max(lows)
+                if min_low > 0 and (max_low - min_low) / min_low <= 0.02: # Using 2% threshold
+                    lowest_price_candle = min(available_candles_hv, key=lambda c: c['low'])
+                    interval_api = next(key for key, val in high_vol_candles.items() if val == lowest_price_candle)
+                    interval_name = CANDLE_INTERVAL_MAP_DISPLAY[interval_api]
+                    time_str = lowest_price_candle['start_time'].strftime('%H:%M')
+                    final_output_high_vol = f"{lowest_price_candle['low']:.2f}({interval_name}, {time_str})"
+                else:
+                    output_parts = []
+                    def check_pair(c1, c2, name1, name2, threshold):
+                        if c1 and c2:
+                            low1, low2 = c1['low'], c2['low']
+                            if min(low1, low2) > 0 and abs(low1 - low2) / min(low1, low2) > threshold:
+                                time1 = c1['start_time'].strftime('%H:%M')
+                                time2 = c2['start_time'].strftime('%H:%M')
+                                return [f"{low1:.2f}({name1}, {time1})", f"{low2:.2f}({name2}, {time2})"]
                         return None
 
-                    # Prioritized comparisons
-                    pair_result = check_pair(c_1h, c_30m, '1 Hour', '30 Min')
-                    if pair_result:
-                        output_parts = pair_result
-                    elif c_1h and c_15m: # Check next pair only if first failed
-                        pair_result = check_pair(c_1h, c_15m, '1 Hour', '15 Min')
-                        if pair_result:
-                            output_parts = pair_result
-                    elif c_30m and c_15m: # Check last pair only if others failed
-                        pair_result = check_pair(c_30m, c_15m, '30 Min', '15 Min')
-                        if pair_result:
-                            output_parts = pair_result
-                    
+                    pair_result = check_pair(c_1h_hv, c_30m_hv, '1 Hour', '30 Min', 0.02)
+                    if pair_result: output_parts = pair_result
+                    elif not pair_result:
+                        pair_result = check_pair(c_1h_hv, c_15m_hv, '1 Hour', '15 Min', 0.02)
+                        if pair_result: output_parts = pair_result
+                    elif not pair_result:
+                        pair_result = check_pair(c_30m_hv, c_15m_hv, '30 Min', '15 Min', 0.02)
+                        if pair_result: output_parts = pair_result
+
                     if output_parts:
-                        final_output_high_vol = ", ".join(sorted(output_parts))
-                        logger.info(f"📈 High Vol (Cond 3) for {symbol_name}: Divergent lows, selected pair: {final_output_high_vol}.")
+                        final_output_high_vol = ", ".join(sorted(output_parts, reverse=True))
                     else:
-                        # Fallback: If no pair has >2% difference (e.g., only 2 candles exist and are close)
-                        # This logic path is essentially the same as Condition 2, acting as a safeguard.
-                        lowest_price_candle = min(available_candles, key=lambda c: c['low'])
+                        lowest_price_candle = min(available_candles_hv, key=lambda c: c['low'])
                         interval_api = next(key for key, val in high_vol_candles.items() if val == lowest_price_candle)
                         interval_name = CANDLE_INTERVAL_MAP_DISPLAY[interval_api]
-                        final_output_high_vol = f"{lowest_price_candle['low']:.2f}({interval_name})"
-                        logger.info(f"📈 High Vol (Fallback) for {symbol_name}: No divergent pairs, selected lowest: {final_output_high_vol}.")
+                        time_str = lowest_price_candle['start_time'].strftime('%H:%M')
+                        final_output_high_vol = f"{lowest_price_candle['low']:.2f}({interval_name}, {time_str})"
+        
+        # --- Phase 4: Format output for HIGHEST UP CANDLE output (Column X) ---
+        final_output_highest_up = ""
+        if highest_up_candle:
+            interval_name = CANDLE_INTERVAL_MAP_DISPLAY[highest_up_candle_interval_api]
+            time_str = highest_up_candle['start_time'].strftime('%H:%M')
+            final_output_highest_up = f"{highest_up_candle['low']:.2f}({interval_name}, {time_str})"
 
-        # --- Phase 3: Prepare updates for the sheet ---
+        # --- Phase 5: Prepare updates for the sheet ---
         for entry in symbol_entries:
             row, row_idx = entry["row"], entry["row"] - 1
 
-            # Update for 3% Down (Column AA)
-            new_value_3pct = ", ".join(sorted(final_output_3_pct))
+            new_value_3pct = final_output_3_pct
             existing_value_3pct = pct_down_result_col_values[row_idx] if row_idx < len(pct_down_result_col_values) else ""
             if str(existing_value_3pct).strip() != new_value_3pct.strip():
                 updates_queued.append({"range": f"{PCT_DOWN_RESULT_COL}{row}", "values": [[new_value_3pct]]})
 
-            # Update for High Volume (Column AC)
             new_value_high_vol = final_output_high_vol
             existing_value_high_vol = high_volume_result_col_values[row_idx] if row_idx < len(high_volume_result_col_values) else ""
             if str(existing_value_high_vol).strip() != new_value_high_vol.strip():
-                updates_queued.append({"range": f"{PCT_DOWN_CONFIRM_COL}{row}", "values": [[new_value_high_vol]]})
+                updates_queued.append({"range": f"{HIGH_VOL_RESULT_COL}{row}", "values": [[new_value_high_vol]]})
+
+            # NEW: Update for Highest Up Candle (Column X)
+            existing_highest_up = highest_up_col_values[row_idx] if row_idx < len(highest_up_col_values) else ""
+            if str(existing_highest_up).strip() != final_output_highest_up.strip():
+                updates_queued.append({"range": f"{HIGHEST_UP_CANDLE_COL}{row}", "values": [[final_output_highest_up]]})
 
     if updates_queued:
         Dashboard.batch_update(updates_queued)
@@ -1063,7 +1131,6 @@ def scan_sheet_for_all_symbols(smart_api_obj, Dashboard, ATHCache):
             if row <= end_row_focus_list:
                 exchange = get_cell_value(all_dashboard_values, row, FOCUS_EXCHANGE_COL)
                 symbol = get_cell_value(all_dashboard_values, row, FOCUS_SYMBOL_COL)
-                # MODIFICATION: Pass the symbol and token cache columns for fast clearing logic
                 process_symbol(symbol, exchange, row, ATH_CACHE_Y_COL_DASH, {
                     'ltp_col': FOCUS_LTP_COL, 
                     'chg_col': FOCUS_CHG_COL, 
@@ -1076,14 +1143,14 @@ def scan_sheet_for_all_symbols(smart_api_obj, Dashboard, ATHCache):
             if row <= end_row_full_positions:
                 exchange = get_cell_value(all_dashboard_values, row, FULL_EXCHANGE_COL)
                 symbol = get_cell_value(all_dashboard_values, row, FULL_SYMBOL_COL)
-                # MODIFICATION: Pass the symbol and token cache columns for fast clearing logic
                 process_symbol(symbol, exchange, row, ATH_CACHE_Z_COL_DASH, {
                     'ltp_col': FULL_LTP_COL, 'chg_col': '', 'block_type': 'Full Positions', 
                     'symbol_col': FULL_SYMBOL_COL,
                     'token_cache_col': ATH_CACHE_Z_COL_DASH,
                     'price_col': FULL_PRICE_COL, 'qty_col': FULL_QTY_COL, 
-                    'swing_low_col': FULL_SWING_LOW_COL, 'return_amt_col': FULL_RETURN_AMT_COL, 
-                    'return_pct_col': FULL_RETURN_PCT_COL, 'move_pct_col': FULL_MOVE_PCT_COL, 
+                    'return_amt_col': FULL_RETURN_AMT_COL, 
+                    'return_pct_col': FULL_RETURN_PCT_COL,
+                    'highest_up_candle_col': HIGHEST_UP_CANDLE_COL, # NEW
                     'percent_from_high_col': FULL_PERCENT_FROM_HIGH_COL, 'entry_date_col': FULL_ENTRY_DATE_COL, 
                     'days_duration_col': FULL_DAYS_DURATION_COL
                 })
@@ -1146,7 +1213,6 @@ def scan_sheet_for_all_symbols(smart_api_obj, Dashboard, ATHCache):
 def update_excel_live_data():
     """
     Updates the Google Sheet with live data for the dashboard portion, including all calculations.
-    MODIFIED: Now includes fast logic to clear row data (but not the symbol itself) when a symbol in Column C or M is deleted or updated.
     """
     global cells_to_clear_color
     
@@ -1188,8 +1254,14 @@ def update_excel_live_data():
             if details.get('block_type') == "Full Positions":
                 if details.get("price_col"): input_ranges.append(f'{details["price_col"]}{row_num}')
                 if details.get("qty_col"): input_ranges.append(f'{details["qty_col"]}{row_num}')
-                if details.get("swing_low_col"): input_ranges.append(f'{details["swing_low_col"]}{row_num}')
                 if details.get("entry_date_col"): input_ranges.append(f'{details["entry_date_col"]}{row_num}')
+                # NEW: Add confirmation columns to the input ranges to prevent unnecessary writes
+                input_ranges.append(f'{HIGHEST_UP_CANDLE_COL}{row_num}')
+                input_ranges.append(f'{HIGHEST_UP_CANDLE_STATUS_COL}{row_num}')
+                input_ranges.append(f'{PCT_DOWN_RESULT_COL}{row_num}')
+                input_ranges.append(f'{PCT_DOWN_STATUS_COL}{row_num}')
+                input_ranges.append(f'{HIGH_VOL_RESULT_COL}{row_num}')
+                input_ranges.append(f'{HIGH_VOL_STATUS_COL}{row_num}')
     
     input_data = {}
     if input_ranges:
@@ -1317,12 +1389,10 @@ def update_excel_live_data():
                 try:
                     price_val_str = str(input_data.get(f'{details["price_col"]}{row_num}') or '0').replace(',','')
                     qty_val_str = str(input_data.get(f'{details["qty_col"]}{row_num}') or '0').replace(',','')
-                    swing_low_val_str = str(input_data.get(f'{details["swing_low_col"]}{row_num}') or '0').replace(',','')
                     entry_date_str = input_data.get(f'{details["entry_date_col"]}{row_num}')
                     
                     price_val = float(price_val_str) if price_val_str else 0
                     qty_val = float(qty_val_str) if qty_val_str else 0
-                    swing_low_val = float(swing_low_val_str) if swing_low_val_str else 0
 
                 except (ValueError, TypeError) as e:
                     logger.warning(f"Could not parse numeric values for row {row_num}. Error: {e}"); continue
@@ -1341,17 +1411,6 @@ def update_excel_live_data():
                             cell_range = {"sheetId": dashboard_sheet_id, "startRowIndex": row_num - 1, "endRowIndex": row_num, "startColumnIndex": col_to_num(col_letter) - 1, "endColumnIndex": col_to_num(col_letter)}
                             requests.append({"repeatCell": {"range": cell_range, "cell": {"userEnteredFormat": {"backgroundColor": rgb_to_float(None)}}, "fields": "userEnteredFormat.backgroundColor"}})
 
-                if swing_low_val:
-                    move_pct = (current_ltp - swing_low_val) / swing_low_val if swing_low_val != 0 else 0
-                    queue_update(details.get('move_pct_col'), move_pct, "0.00%", GREEN_COLOR if move_pct > 0 else RED_COLOR if move_pct < 0 else None)
-                else:
-                    queue_update(details.get('move_pct_col'), "", "General", bg_color=None)
-                    col_letter = details.get('move_pct_col')
-                    if col_letter:
-                        cell_range = {"sheetId": dashboard_sheet_id, "startRowIndex": row_num - 1, "endRowIndex": row_num, "startColumnIndex": col_to_num(col_letter) - 1, "endColumnIndex": col_to_num(col_letter)}
-                        requests.append({"repeatCell": {"range": cell_range, "cell": {"userEnteredFormat": {"backgroundColor": rgb_to_float(None)}}, "fields": "userEnteredFormat.backgroundColor"}})
-
-
                 if token in twenty_five_day_high_cache:
                     high_25_day = twenty_five_day_high_cache[token]
                     if high_25_day > 0:
@@ -1366,6 +1425,55 @@ def update_excel_live_data():
                         days_duration = f"{(datetime.datetime.now() - datetime.datetime.strptime(entry_date_str, '%d-%b-%y')).days} Days"
                     except ValueError: days_duration = "Invalid Date"
                 queue_update(details.get('days_duration_col'), days_duration, "@")
+
+                # --- NEW Confirmation Logic with Coloring ---
+                def get_confirmation_status_and_color(cell_text, ltp):
+                    if not cell_text or not isinstance(cell_text, str):
+                        return "", None
+                    
+                    prices_str = re.findall(r"(\d+\.\d+)", cell_text)
+                    if not prices_str:
+                        return "", None
+                    
+                    prices = [float(p) for p in prices_str]
+                    statuses = []
+                    for price in prices:
+                        if ltp > price:
+                            statuses.append("Above")
+                        else:
+                            statuses.append("Below")
+                    
+                    status_text = "/".join(statuses)
+                    
+                    # Determine color based on the first status
+                    color = None
+                    if status_text.startswith("Above"):
+                        color = GREEN_COLOR
+                    elif status_text.startswith("Below"):
+                        color = RED_COLOR
+                        
+                    return status_text, color
+
+                # Highest Up Candle Confirmation (X -> Y)
+                x_text = input_data.get(f'{HIGHEST_UP_CANDLE_COL}{row_num}')
+                y_status, y_color = get_confirmation_status_and_color(x_text, current_ltp)
+                existing_y_status = input_data.get(f'{HIGHEST_UP_CANDLE_STATUS_COL}{row_num}')
+                if str(y_status) != str(existing_y_status or ''):
+                     queue_update(HIGHEST_UP_CANDLE_STATUS_COL, y_status, "@", bg_color=y_color)
+
+                # 3% Down Confirmation (AA -> AB)
+                aa_text = input_data.get(f'{PCT_DOWN_RESULT_COL}{row_num}')
+                ab_status, ab_color = get_confirmation_status_and_color(aa_text, current_ltp)
+                existing_ab_status = input_data.get(f'{PCT_DOWN_STATUS_COL}{row_num}')
+                if str(ab_status) != str(existing_ab_status or ''):
+                     queue_update(PCT_DOWN_STATUS_COL, ab_status, "@", bg_color=ab_color)
+
+                # High Volume Confirmation (AC -> AD)
+                ac_text = input_data.get(f'{HIGH_VOL_RESULT_COL}{row_num}')
+                ad_status, ad_color = get_confirmation_status_and_color(ac_text, current_ltp)
+                existing_ad_status = input_data.get(f'{HIGH_VOL_STATUS_COL}{row_num}')
+                if str(ad_status) != str(existing_ad_status or ''):
+                     queue_update(HIGH_VOL_STATUS_COL, ad_status, "@", bg_color=ad_color)
     
     cells_to_clear_color = cells_to_color_this_cycle
 
@@ -1496,7 +1604,7 @@ def run_initial_setup_data_fetch():
     # Fetch data for 3% Down setup
     unique_tokens_3pct = list(set([(token, details[0]['exchange_type']) for token, details in pct3_details_copy.items() if details]))
     for interval_api in CANDLE_INTERVALS_3PCT_API:
-        fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_3pct, interval_api, datetime.datetime.now() - timedelta(hours=2), datetime.datetime.now())
+        fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_3pct, interval_api)
     
     # NEW: Fetch data for % from High setup
     fetch_25_day_high(smart_api_obj, full_positions_copy)
@@ -1577,19 +1685,19 @@ def run_background_task_scheduler():
                 
                 # Check 15-minute interval
                 if current_minute % 15 == 1 and current_minute != last_checked_minute_15min:
-                    fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_3pct, 'FIFTEEN_MINUTE', now - timedelta(minutes=30), now)
+                    fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_3pct, 'FIFTEEN_MINUTE')
                     check_and_update_price_volume_setups()
                     last_checked_minute_15min = current_minute
                 
                 # Check 30-minute interval
                 if current_minute % 30 == 1 and current_minute != last_checked_minute_30min:
-                    fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_3pct, 'THIRTY_MINUTE', now - timedelta(minutes=60), now)
+                    fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_3pct, 'THIRTY_MINUTE')
                     check_and_update_price_volume_setups()
                     last_checked_minute_30min = current_minute
 
                 # Check 1-hour interval
                 if current_minute == 16 and now.hour >= 10 and current_minute != last_checked_minute_1hr:
-                    fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_3pct, 'ONE_HOUR', now - timedelta(hours=2), now)
+                    fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_3pct, 'ONE_HOUR')
                     check_and_update_price_volume_setups()
                     last_checked_minute_1hr = current_minute
             
