@@ -18,6 +18,7 @@ import collections
 import datetime
 import re
 from datetime import timedelta
+from dateutil.relativedelta import relativedelta
 
 # --- Flask for Web Service Deployment ---
 from flask import Flask
@@ -81,7 +82,7 @@ if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
 @app.route('/ping')
 def ping():
     """A simple route for deployment services to check if the app is alive."""
-    return "✅ Combined Trading Server is running", 200
+    return "Combined Trading Server is running", 200
 
 # =====================================================================================================================
 #
@@ -99,6 +100,7 @@ TOTP_SECRET = "QHO5IWOISV56Z2BFTPFSRSQVRQ"
 GOOGLE_SHEET_ID = '1cYBpsVKCbrYCZzrj8NAMEgUG4cXy5Q5r9BtQE1Cjmz0'
 DASHBOARD_SHEET_NAME = 'Dashboard'
 ATH_CACHE_SHEET_NAME = 'ATH Cache'
+ORDERS_SHEET_NAME = 'Orders' 
 
 # Set the path to the Google credentials JSON file
 if os.path.exists("/etc/secrets/creds.json"):
@@ -121,6 +123,7 @@ smart_ws = None
 gsheet = None
 Dashboard = None
 ATHCache = None
+OrdersSheet = None 
 
 # --- Threading Lock for Data Safety ---
 data_lock = threading.Lock()
@@ -128,21 +131,20 @@ data_lock = threading.Lock()
 # --- Data Caching and State Management Variables ---
 # For Live Dashboard
 latest_tick_data = collections.defaultdict(dict)
-latest_quote_data = collections.defaultdict(dict) # NEW: For storing REST API quote data
+latest_quote_data = collections.defaultdict(dict) 
 excel_dashboard_details = collections.defaultdict(list)
 previous_ltp_data = {}
 previous_percentage_change_data = {}
 cells_to_clear_color = set()
 
 # For ORH and 3% Down Setups
-excel_setup_details = collections.defaultdict(list) # For ORH symbols
-excel_3pct_setup_details = collections.defaultdict(list) # For 3% Down symbols
+excel_setup_details = collections.defaultdict(list)
+excel_3pct_setup_details = collections.defaultdict(list)
 interval_ohlc_data = collections.defaultdict(lambda: collections.defaultdict(dict))
 completed_3min_candles = collections.defaultdict(list)
-# MODIFIED: This now stores a large history of candles for analysis.
 volume_history_3pct = collections.defaultdict(lambda: collections.defaultdict(list))
 previous_day_high_cache = {}
-twenty_five_day_high_cache = {} # NEW: Cache for the new "% from High" setup
+monthly_high_cache = {}
 
 # For Subscription Management
 subscribed_tokens = set()
@@ -159,7 +161,7 @@ SCRIP_SEARCH_RETRY_MULTIPLIER = 1.5
 HISTORICAL_DATA_RETRY_ATTEMPTS = 3
 HISTORICAL_DATA_RETRY_DELAY = 1.0
 HISTORICAL_DATA_RETRY_MULTIPLIER = 1.5
-QUOTE_API_MAX_TOKENS = 50 # Max tokens allowed per single getMarketData API request
+QUOTE_API_MAX_TOKENS = 50 
 
 # For Live Dashboard
 INDEX_START_ROW = 100
@@ -179,9 +181,25 @@ FULL_RETURN_AMT_COL = 'Q'
 FULL_RETURN_PCT_COL = 'R'
 FULL_ENTRY_DATE_COL = 'T'
 FULL_DAYS_DURATION_COL = 'U'
-HIGHEST_UP_CANDLE_COL = 'X' 
-HIGHEST_UP_CANDLE_STATUS_COL = 'Y' # NEW: Confirmation for Highest Up Candle
-FULL_PERCENT_FROM_HIGH_COL = 'Z'
+# =================================================================================
+# ===== CHANGE IMPLEMENTED HERE: Added new column for sorting =====================
+# =================================================================================
+MONTH_SORT_COL = 'W'
+# =================================================================================
+SWING_LOW_INPUT_COL = 'X'
+PERCENT_FROM_SWING_LOW_COL = 'Y'
+HIGHEST_UP_CANDLE_COL = 'Z'
+HIGHEST_UP_CANDLE_STATUS_COL = 'AA'
+HIGH_VOL_RESULT_COL = 'AB'
+HIGH_VOL_STATUS_COL = 'AC'
+PCT_DOWN_RESULT_COL = 'AD'
+PCT_DOWN_STATUS_COL = 'AE'
+# =================================================================================
+# ===== CHANGE IMPLEMENTED HERE: Added final column for sorting range ===========
+# =================================================================================
+FULL_POSITIONS_END_COL = 'AG'
+# =================================================================================
+
 INDEX_EXCHANGE_COL = 'B'
 INDEX_SYMBOL_COL = 'C'
 INDEX_LTP_COL = 'D'
@@ -194,27 +212,23 @@ QUARTER_CHG_COL = 'Q'
 # For ORH and 3% Down Setups
 ORH_EXCHANGE_COL = 'B'
 ORH_SYMBOL_COL = 'C'
-ORH_TOKEN_COL = 'Y' # This column is shared with ATH_CACHE_Y_COL_DASH
+ORH_QTY_COL = 'I' 
+ORH_TOKEN_COL = 'Y'
 ORH_RESULT_COL = 'G'
 ORH_BUY_STOP_COL = 'H'
 PCT_EXCHANGE_COL_3PCT = 'L'
 PCT_SYMBOL_COL_3PCT = 'M'
-PCT_TOKEN_COL_3PCT = 'Z' # This column is shared with ATH_CACHE_Z_COL_DASH
-PCT_DOWN_RESULT_COL = 'AA'
-PCT_DOWN_STATUS_COL = 'AB'      # NEW: Confirmation for 3% Down
-HIGH_VOL_RESULT_COL = 'AC'      # RENAMED for clarity
-HIGH_VOL_STATUS_COL = 'AD'      # NEW: Confirmation for High Volume
+PCT_TOKEN_COL_3PCT = 'Z'
 
 CANDLE_INTERVALS_3PCT_API = ['FIFTEEN_MINUTE', 'THIRTY_MINUTE', 'ONE_HOUR']
 CANDLE_INTERVAL_MAP_DISPLAY = {
-    'FIFTEEN_MINUTE': '15 Min',
-    'THIRTY_MINUTE': '30 Min',
-    'ONE_HOUR': '1 Hour'
+    'FIFTEEN_MINUTE': '15 min',
+    'THIRTY_MINUTE': '30 min',
+    'ONE_HOUR': '60 min'
 }
 
-# NEW: ORH Specific Configuration
-ORH_MAX_CANDLES = 5 # Number of 3-min candles to retain for ORH logic
-ORH_MAX_ROW = 17    # Maximum row in Dashboard sheet for ORH setup to apply
+ORH_MAX_CANDLES = 5
+ORH_MAX_ROW = 17
 
 # =====================================================================================================================
 #
@@ -566,7 +580,7 @@ def fetch_initial_candle_data(smart_api_obj, symbols_to_fetch):
                     # MODIFIED: Use ORH_MAX_CANDLES
                     if len(completed_3min_candles[token]) > ORH_MAX_CANDLES:
                         completed_3min_candles[token] = completed_3min_candles[token][-ORH_MAX_CANDLES:]
-                    logger.info(f"✅ Fetched {len(completed_3min_candles[token])} 3-min candles for {symbol_name} (Token: {token}).")
+                    logger.info(f"Fetched {len(completed_3min_candles[token])} 3-min candles for {symbol_name} (Token: {token}).")
                     break
                 else:
                     logger.warning(f"Attempt {attempt + 1}/{MAX_RETRIES}: Could not fetch 3-min data for {symbol_name}. Message: {response.get('message', 'Unknown error')}")
@@ -620,63 +634,21 @@ def fetch_previous_day_candle_data(smart_api_obj, symbols_to_fetch):
                 if attempt < MAX_RETRIES - 1: time.sleep(RETRY_DELAY_SECONDS)
         time.sleep(0.4) # Add delay between each symbol fetch to avoid rate limiting
 
-def fetch_25_day_high(smart_api_obj, symbols_to_fetch):
-    """
-    NEW: Fetches the highest price over the last 25 trading days for each symbol.
-    """
-    global twenty_five_day_high_cache
-    logger.info("Fetching 25-day high for 'Full Positions'...")
-    
-    # Fetch data for a slightly larger window to ensure we get 25 trading days
-    to_date = datetime.date.today()
-    from_date = to_date - timedelta(days=40) 
-    from_date_str = from_date.strftime("%Y-%m-%d %H:%M")
-    to_date_str = to_date.strftime("%Y-%m-%d %H:%M")
-
-    with data_lock:
-        symbols_to_fetch_copy = symbols_to_fetch.copy()
-
-    for token, details in symbols_to_fetch_copy.items():
-        symbol_name = details['symbol']
-        exchange_type = {'NSE': 1, 'BSE': 3, 'NFO': 2}.get(details.get('exchange', 'NSE').upper(), 1)
-        exchange_str = {1: "NSE", 3: "BSE"}.get(exchange_type)
-        if not exchange_str:
-            logger.warning(f"Cannot fetch 25-day high for token {token}, unknown exchange type {exchange_type}")
-            continue
-
-        try:
-            historic_param = {"exchange": exchange_str, "symboltoken": token, "interval": "ONE_DAY", "fromdate": from_date_str, "todate": to_date_str}
-            response = smart_api_obj.getCandleData(historic_param)
-            
-            if response and response.get("status") and response.get("data"):
-                # Find the highest price from the 'high' column (index 2) of the candle data
-                highs = [candle[2] for candle in response["data"]]
-                if highs:
-                    max_high = max(highs)
-                    twenty_five_day_high_cache[token] = max_high
-                    logger.info(f"✅ 25-Day High for {symbol_name} (Token: {token}) is {max_high:.2f}")
-                else:
-                    logger.warning(f"No daily candle data found for {symbol_name} to calculate 25-day high.")
-            else:
-                logger.warning(f"Could not fetch 25-day high for {symbol_name}. Message: {response.get('message', 'Unknown error')}")
-        except Exception as e:
-            logger.error(f"Exception while fetching 25-day high for {symbol_name}: {e}")
-        
-        time.sleep(0.4) # Add delay to prevent rate limiting
-
-
-# MODIFIED: This function now fetches data from the previous week's Monday.
 def fetch_historical_candles_for_3pct_down(smart_api_obj, tokens_to_fetch, interval_api):
     """
     Fetches historical data for price/volume setups from the previous week's Monday to now.
     """
-    # NEW: Calculate the start date as the Monday of the previous week.
-    today = datetime.date.today()
-    # today.weekday() is 0 for Monday, 6 for Sunday.
-    # We go back to the previous Monday by subtracting the current weekday + 7 days.
-    days_to_last_monday = today.weekday() + 7
-    from_dt = datetime.datetime.combine(today - timedelta(days=days_to_last_monday), datetime.time.min)
-    to_dt = datetime.datetime.now()
+    today = datetime.datetime.now()
+    if today.weekday() == 5: # If Saturday
+        to_dt = today - timedelta(days=1)
+    elif today.weekday() == 6: # If Sunday
+        to_dt = today - timedelta(days=2)
+    else:
+        to_dt = today
+    
+    to_dt = to_dt.replace(hour=23, minute=59, second=59)
+    days_to_last_monday = to_dt.weekday() + 7
+    from_dt = datetime.datetime.combine(to_dt.date() - timedelta(days=days_to_last_monday), datetime.time.min)
     
     from_date_str = from_dt.strftime("%Y-%m-%d %H:%M")
     to_date_str = to_dt.strftime("%Y-%m-%d %H:%M")
@@ -702,7 +674,6 @@ def fetch_historical_candles_for_3pct_down(smart_api_obj, tokens_to_fetch, inter
             if response and response.get("status") and response.get("data"):
                 candle_data = response["data"]
                 
-                # Store the full history for analysis
                 candle_history = []
                 for c in candle_data:
                     candle_history.append({
@@ -713,266 +684,384 @@ def fetch_historical_candles_for_3pct_down(smart_api_obj, tokens_to_fetch, inter
                 with data_lock:
                     volume_history_3pct[token][interval_api] = candle_history
                 
-                logger.info(f"✅ Fetched {len(candle_history)} candles for {symbol_name} ({interval_api}).")
+                logger.info(f"Fetched {len(candle_history)} candles for {symbol_name} ({interval_api}).")
             else:
                 logger.warning(f"Fetch error for {symbol_name} ({interval_api}). Message: {response.get('message', 'Unknown error')}")
         except Exception as e:
             logger.error(f"Exception fetching data for {symbol_name} ({interval_api}): {e}")
         
-        time.sleep(0.5) # Add delay between each symbol fetch to avoid rate limiting
+        time.sleep(0.5)
 
+def fetch_monthly_highs(smart_api_obj, tokens_to_fetch):
+    """
+    Fetches the high of the current and previous month for given tokens.
+    Stores the higher of the two in the monthly_high_cache.
+    """
+    global monthly_high_cache
+    logger.info("Fetching monthly high data for Swing Low setup...")
+
+    today = datetime.date.today()
+    # Previous month start
+    prev_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+
+    from_date_str = prev_month_start.strftime("%Y-%m-%d %H:%M")
+    to_date_str = today.strftime("%Y-%m-%d %H:%M")
+
+    with data_lock:
+        tokens_to_fetch_copy = list(tokens_to_fetch)
+
+    for token, exchange_type in tokens_to_fetch_copy:
+        exchange_str = {1: "NSE", 3: "BSE"}.get(exchange_type)
+        if not exchange_str:
+            continue
+
+        try:
+            historic_param = {
+                "exchange": exchange_str,
+                "symboltoken": token,
+                "interval": "ONE_DAY", # Fetch daily data to calculate monthly high
+                "fromdate": from_date_str,
+                "todate": to_date_str
+            }
+            response = smart_api_obj.getCandleData(historic_param)
+            
+            if response and response.get("status") and response.get("data"):
+                data = response["data"]
+                current_month_high = 0
+                prev_month_high = 0
+
+                for c in data:
+                    candle_date = datetime.datetime.fromisoformat(c[0]).date()
+                    candle_high = c[2]
+                    
+                    if candle_date.month == today.month and candle_date.year == today.year:
+                        current_month_high = max(current_month_high, candle_high)
+                    elif candle_date.month == prev_month_start.month and candle_date.year == prev_month_start.year:
+                        prev_month_high = max(prev_month_high, candle_high)
+                
+                final_high = max(current_month_high, prev_month_high)
+                if final_high > 0:
+                    with data_lock:
+                        monthly_high_cache[token] = final_high
+                    logger.info(f"Updated monthly high for token {token}: {final_high:.2f}")
+
+            else:
+                logger.warning(f"Could not fetch monthly data for token {token}. Response: {response.get('message', 'Unknown error')}")
+        except Exception as e:
+            logger.error(f"Exception fetching monthly data for token {token}: {e}")
+        
+        time.sleep(0.5) # API rate limiting
 
 def check_and_update_orh_setup():
-    """Checks the latest completed 3-min candle for ORH setup and updates Google Sheet."""
-    logger.info("🔍 Checking latest 3-min candle for ORH setup...")
+    """
+    Checks the latest completed 3-min candle for ORH setup, updates Google Sheet,
+    and creates a pre-filled order row in the 'Orders' sheet.
+    """
+    logger.info("Checking latest 3-min candle for ORH setup...")
     updates_queued = []
-    orh_result_col_values = Dashboard.col_values(col_to_num(ORH_RESULT_COL))
-    orh_buy_stop_col_values = Dashboard.col_values(col_to_num(ORH_BUY_STOP_COL))
-
+    
+    dashboard_data = Dashboard.get_all_values()
+    
     with data_lock:
         setup_details_copy = excel_setup_details.copy()
 
     for token, symbol_entries in setup_details_copy.items():
-        # NEW: Filter symbol_entries to only include those within the ORH_MAX_ROW limit
         filtered_symbol_entries = [entry for entry in symbol_entries if entry['row'] <= ORH_MAX_ROW]
-        
-        if not filtered_symbol_entries: # If no entries are within the limit, skip this token
+        if not filtered_symbol_entries:
             continue
 
         candles, prev_high_entry = completed_3min_candles.get(token, []), previous_day_high_cache.get(token)
-        if not candles or not prev_high_entry or not prev_high_entry.get("high"): continue
+        if not candles or not prev_high_entry or not prev_high_entry.get("high"):
+            continue
 
         prev_high = prev_high_entry["high"]
         latest_candle = candles[-1]
         high, low, close = latest_candle['high'], latest_candle['low'], latest_candle['close']
-        orh_result, trigger_time_str, buy_stop_value = "No", "", None
-
-        if high != low and close >= (low + 0.7 * (high - low)) and close > prev_high:
-            orh_result, trigger_time_str = "Yes", latest_candle['start_time'].strftime('%H:%M')
-            buy_stop_value = round(low * 0.995, 2)
-            # Use filtered_symbol_entries[0]['symbol'] for logging as we know it's not empty
-            logger.info(f"🚨 ORH Triggered for {filtered_symbol_entries[0]['symbol']} at {latest_candle['start_time']:%Y-%m-%d %H:%M:%S} ➤ O:{latest_candle['open']}, H:{high}, L:{low}, C:{close}, Buy Stop:{buy_stop_value}")
-            
-            if winsound:
-                try:
-                    winsound.Beep(1000, 400)
-                except Exception as e:
-                    logger.warning(f"🔇 Sound alert failed: {e}")
-
-        new_value_orh_col = f"Yes({trigger_time_str})" if orh_result == "Yes" else "No"
-        new_value_buy_stop_col = buy_stop_value if buy_stop_value else ""
-
-        # Iterate over the filtered entries to apply updates
-        for entry in filtered_symbol_entries: # Use filtered_symbol_entries here
+        
+        for entry in filtered_symbol_entries:
             row, row_idx = entry["row"], entry["row"] - 1
-            if row_idx < len(orh_result_col_values) and str(orh_result_col_values[row_idx]).strip() != new_value_orh_col.strip():
-                updates_queued.append({"range": f"{ORH_RESULT_COL}{row}", "values": [[new_value_orh_col]]})
-            if row_idx < len(orh_buy_stop_col_values) and str(orh_buy_stop_col_values[row_idx]).strip() != str(new_value_buy_stop_col).strip():
-                updates_queued.append({"range": f"{ORH_BUY_STOP_COL}{row}", "values": [[new_value_buy_stop_col]]})
+            
+            current_orh_value = dashboard_data[row_idx][col_to_num(ORH_RESULT_COL) - 1] if len(dashboard_data) > row_idx and len(dashboard_data[row_idx]) >= col_to_num(ORH_RESULT_COL) else ""
+
+            if "Yes" in current_orh_value:
+                continue
+
+            if high != low and close >= (low + 0.7 * (high - low)) and close > prev_high:
+                trigger_time_str = latest_candle['start_time'].strftime('%H:%M')
+                buy_stop_value = round(low * 0.995, 2)
+                
+                logger.info(f"ORH Triggered for {entry['symbol']} at {latest_candle['start_time']:%Y-%m-%d %H:%M:%S} > H:{high}, L:{low}, C:{close}")
+                
+                if winsound:
+                    try:
+                        winsound.Beep(1000, 400)
+                    except Exception as e:
+                        logger.warning(f"Sound alert failed: {e}")
+
+                updates_queued.append({"range": f"{ORH_RESULT_COL}{row}", "values": [[f"Yes({trigger_time_str})"]]})
+                updates_queued.append({"range": f"{ORH_BUY_STOP_COL}{row}", "values": [[buy_stop_value]]})
+
+                try:
+                    symbol = dashboard_data[row_idx][col_to_num(ORH_SYMBOL_COL) - 1]
+                    exchange = dashboard_data[row_idx][col_to_num(ORH_EXCHANGE_COL) - 1]
+                    quantity = dashboard_data[row_idx][col_to_num(ORH_QTY_COL) - 1]
+
+                    if not quantity or int(quantity) <= 0:
+                        logger.warning(f"Cannot create order for {symbol}, quantity is missing or zero in column I.")
+                        continue
+                    
+                    trigger_price = round(high * 1.005, 2)
+
+                    new_order_row = [
+                        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        symbol,
+                        exchange,
+                        "BUY",
+                        "STOPLOSS_MARKET",
+                        quantity,
+                        trigger_price,
+                        ""
+                    ]
+                    
+                    OrdersSheet.append_row(new_order_row, value_input_option='USER_ENTERED')
+                    logger.info(f"Successfully created a pre-filled order row for {symbol} in the 'Orders' sheet.")
+
+                except Exception as e:
+                    logger.exception(f"Failed to create order row for {symbol}: {e}")
 
     if updates_queued:
         Dashboard.batch_update(updates_queued)
-        logger.info(f"✅ Applied {len(updates_queued)} ORH updates to Dashboard.")
+        logger.info(f"Applied {len(updates_queued)} ORH updates to Dashboard.")
     else:
-        logger.info("ℹ️ No ORH setup updates needed.")
+        logger.info("No ORH setup updates needed.")
 
-# MODIFIED: This function has been significantly updated with the new logic for all setups.
+
 def check_and_update_price_volume_setups():
     """
-    Checks for 3% down, high volume, and highest up candle setups based on extended historical data.
+    Checks for 3% down, high volume, and highest up candle setups based on historical data.
+    Implements proximity consolidation and price-based sorting for the output.
     """
-    logger.info("🔍 Checking for Price/Volume setups...")
+    logger.info("Checking for Price/Volume setups with proximity consolidation and price sorting...")
     updates_queued = []
     
-    pct_down_result_col_values = Dashboard.col_values(col_to_num(PCT_DOWN_RESULT_COL))
-    high_volume_result_col_values = Dashboard.col_values(col_to_num(HIGH_VOL_RESULT_COL))
-    highest_up_col_values = Dashboard.col_values(col_to_num(HIGHEST_UP_CANDLE_COL))
+    try:
+        # Fetch current values from the sheet to prevent redundant updates
+        pct_down_result_col_values = Dashboard.col_values(col_to_num(PCT_DOWN_RESULT_COL))
+        high_volume_result_col_values = Dashboard.col_values(col_to_num(HIGH_VOL_RESULT_COL))
+        highest_up_col_values = Dashboard.col_values(col_to_num(HIGHEST_UP_CANDLE_COL))
+    except Exception as e:
+        logger.error(f"Could not fetch column values for setup checks: {e}")
+        pct_down_result_col_values, high_volume_result_col_values, highest_up_col_values = [], [], []
 
     with data_lock:
         setup_details_copy = excel_3pct_setup_details.copy()
         volume_history_copy = volume_history_3pct.copy()
 
-    for token, symbol_entries in setup_details_copy.items():
-        symbol_name = symbol_entries[0]['symbol']
+    def format_consolidated_output(candle_dict):
+        """
+        New formatting logic:
+        1. Consolidates signals if their lows are within a 2% threshold.
+        2. For consolidated signals, keeps only the highest timeframe.
+        3. Sorts the final, unique signals by low price (high to low).
+        4. Formats the output string as "price (timeframe)".
+        """
+        # 1. Get all valid candidate candles
+        available_candles = [
+            {'candle': c, 'interval_api': interval_api} 
+            for interval_api, c in candle_dict.items() if c
+        ]
+        if not available_candles:
+            return ""
+
+        # Sort by low price initially to make grouping easier
+        available_candles.sort(key=lambda x: x['candle']['low'])
+
+        # 2. Group candles by proximity (2% threshold)
+        groups = []
+        if available_candles:
+            current_group = [available_candles[0]]
+            for i in range(1, len(available_candles)):
+                # Check if current candle's low is within 2% of the first candle in the group
+                if available_candles[i]['candle']['low'] <= current_group[0]['candle']['low'] * 1.02:
+                    current_group.append(available_candles[i])
+                else:
+                    groups.append(current_group)
+                    current_group = [available_candles[i]]
+            groups.append(current_group)
+
+        # 3. For each group, select the one with the highest timeframe
+        unique_signals = []
+        for group in groups:
+            best_in_group = max(group, key=lambda info: CANDLE_INTERVALS_3PCT_API.index(info['interval_api']))
+            unique_signals.append(best_in_group)
         
+        # 4. Sort the final unique signals by low price, descending (high to low)
+        sorted_unique_signals = sorted(unique_signals, key=lambda info: info['candle']['low'], reverse=True)
+
+        # 5. Format the final output string
+        output_parts = []
+        for signal_info in sorted_unique_signals:
+            candle = signal_info['candle']
+            interval_name = CANDLE_INTERVAL_MAP_DISPLAY[signal_info['interval_api']]
+            output_parts.append(f"{candle['low']:.2f} ({interval_name})")
+
+        return ", ".join(output_parts)
+
+    for token, symbol_entries in setup_details_copy.items():
         three_pct_down_candles = {}
         high_vol_candles = {}
-        # NEW: Variables for Highest Up Candle setup
-        highest_up_candle = None
-        highest_up_candle_interval_api = None
-        max_gain = -1 # Start with a negative number to ensure any gain is higher
+        highest_up_candles = {}
 
-        # --- Phase 1: Analyze historical data for all timeframes ---
+        # --- Phase 1: Find the best candidate candle for each timeframe ---
         for interval_api in CANDLE_INTERVALS_3PCT_API:
             candle_history = volume_history_copy.get(token, {}).get(interval_api)
-
             if not candle_history:
                 continue
 
-            # --- Find representative candle for 3% Down setup ---
-            triggered_3pct_candles = []
-            for candle in candle_history:
-                high_price, close_price = candle.get('high', 0), candle.get('close', 0)
-                if high_price > 0 and (high_price - close_price) / high_price >= 0.03:
-                    triggered_3pct_candles.append(candle)
-            
+            triggered_3pct_candles = [c for c in candle_history if c.get('high', 0) > 0 and (c['high'] - c['close']) / c['high'] >= 0.03]
             if triggered_3pct_candles:
-                lowest_low_candle = min(triggered_3pct_candles, key=lambda c: c['low'])
-                three_pct_down_candles[interval_api] = lowest_low_candle
+                three_pct_down_candles[interval_api] = min(triggered_3pct_candles, key=lambda c: c['low'])
 
-            # --- Find representative candle for High Volume setup ---
-            highest_volume_candle = max(candle_history, key=lambda c: c.get('volume', 0))
-            high_vol_candles[interval_api] = highest_volume_candle
+            if any(c.get('volume', 0) > 0 for c in candle_history):
+                high_vol_candles[interval_api] = max(candle_history, key=lambda c: c.get('volume', 0))
 
-            # --- Find representative candle for Highest Up Candle setup ---
-            for candle in candle_history:
-                open_price, close_price = candle.get('open', 0), candle.get('close', 0)
-                if open_price > 0:
-                    gain = (close_price - open_price) / open_price
-                    if gain > max_gain:
-                        max_gain = gain
-                        highest_up_candle = candle
-                        highest_up_candle_interval_api = interval_api
+            gainer_candles = [c for c in candle_history if c.get('open', 0) > 0]
+            if gainer_candles:
+                highest_up_candles[interval_api] = max(gainer_candles, key=lambda c: (c['close'] - c['open']) / c['open'])
         
-        # --- Phase 2: Apply conditional logic for 3% DOWN output (Column AA) ---
-        final_output_3_pct = ""
-        c_1h_3pct = three_pct_down_candles.get('ONE_HOUR')
-        c_30m_3pct = three_pct_down_candles.get('THIRTY_MINUTE')
-        c_15m_3pct = three_pct_down_candles.get('FIFTEEN_MINUTE')
-        
-        available_candles_3pct = [c for c in [c_1h_3pct, c_30m_3pct, c_15m_3pct] if c]
+        # --- Phase 2: Consolidate and format outputs using the new logic ---
+        final_output_3_pct = format_consolidated_output(three_pct_down_candles)
+        final_output_high_vol = format_consolidated_output(high_vol_candles)
+        final_output_highest_up = format_consolidated_output(highest_up_candles)
 
-        if len(available_candles_3pct) > 0:
-            lows = [c['low'] for c in available_candles_3pct]
-            if len(set(lows)) == 1:
-                selected_candle = c_1h_3pct if c_1h_3pct else c_30m_3pct if c_30m_3pct else c_15m_3pct
-                interval_api = next(key for key, val in three_pct_down_candles.items() if val == selected_candle)
-                interval_name = CANDLE_INTERVAL_MAP_DISPLAY[interval_api]
-                time_str = selected_candle['start_time'].strftime('%H:%M')
-                final_output_3_pct = f"{selected_candle['low']:.2f}({interval_name}, {time_str})"
-            else:
-                min_low, max_low = min(lows), max(lows)
-                if min_low > 0 and (max_low - min_low) / min_low <= 0.01: # Using 1% threshold
-                    lowest_price_candle = min(available_candles_3pct, key=lambda c: c['low'])
-                    interval_api = next(key for key, val in three_pct_down_candles.items() if val == lowest_price_candle)
-                    interval_name = CANDLE_INTERVAL_MAP_DISPLAY[interval_api]
-                    time_str = lowest_price_candle['start_time'].strftime('%H:%M')
-                    final_output_3_pct = f"{lowest_price_candle['low']:.2f}({interval_name}, {time_str})"
-                else:
-                    output_parts = []
-                    def check_pair(c1, c2, name1, name2, threshold):
-                        if c1 and c2:
-                            low1, low2 = c1['low'], c2['low']
-                            if min(low1, low2) > 0 and abs(low1 - low2) / min(low1, low2) > threshold:
-                                time1 = c1['start_time'].strftime('%H:%M')
-                                time2 = c2['start_time'].strftime('%H:%M')
-                                return [f"{low1:.2f}({name1}, {time1})", f"{low2:.2f}({name2}, {time2})"]
-                        return None
-                    
-                    pair_result = check_pair(c_1h_3pct, c_30m_3pct, '1 Hour', '30 Min', 0.01)
-                    if pair_result: output_parts = pair_result
-                    elif not pair_result:
-                        pair_result = check_pair(c_1h_3pct, c_15m_3pct, '1 Hour', '15 Min', 0.01)
-                        if pair_result: output_parts = pair_result
-                    elif not pair_result:
-                        pair_result = check_pair(c_30m_3pct, c_15m_3pct, '30 Min', '15 Min', 0.01)
-                        if pair_result: output_parts = pair_result
-
-                    if output_parts:
-                        final_output_3_pct = ", ".join(sorted(output_parts, reverse=True))
-                    else:
-                        lowest_price_candle = min(available_candles_3pct, key=lambda c: c['low'])
-                        interval_api = next(key for key, val in three_pct_down_candles.items() if val == lowest_price_candle)
-                        interval_name = CANDLE_INTERVAL_MAP_DISPLAY[interval_api]
-                        time_str = lowest_price_candle['start_time'].strftime('%H:%M')
-                        final_output_3_pct = f"{lowest_price_candle['low']:.2f}({interval_name}, {time_str})"
-
-
-        # --- Phase 3: Apply conditional logic for HIGH VOLUME output (Column AC) ---
-        final_output_high_vol = ""
-        c_1h_hv = high_vol_candles.get('ONE_HOUR')
-        c_30m_hv = high_vol_candles.get('THIRTY_MINUTE')
-        c_15m_hv = high_vol_candles.get('FIFTEEN_MINUTE')
-
-        available_candles_hv = [c for c in [c_1h_hv, c_30m_hv, c_15m_hv] if c]
-        
-        if len(available_candles_hv) > 0:
-            lows = [c['low'] for c in available_candles_hv]
-            if len(set(lows)) == 1:
-                selected_candle = c_1h_hv if c_1h_hv else c_30m_hv if c_30m_hv else c_15m_hv
-                interval_api = next(key for key, val in high_vol_candles.items() if val == selected_candle)
-                interval_name = CANDLE_INTERVAL_MAP_DISPLAY[interval_api]
-                time_str = selected_candle['start_time'].strftime('%H:%M')
-                final_output_high_vol = f"{selected_candle['low']:.2f}({interval_name}, {time_str})"
-            else:
-                min_low, max_low = min(lows), max(lows)
-                if min_low > 0 and (max_low - min_low) / min_low <= 0.02: # Using 2% threshold
-                    lowest_price_candle = min(available_candles_hv, key=lambda c: c['low'])
-                    interval_api = next(key for key, val in high_vol_candles.items() if val == lowest_price_candle)
-                    interval_name = CANDLE_INTERVAL_MAP_DISPLAY[interval_api]
-                    time_str = lowest_price_candle['start_time'].strftime('%H:%M')
-                    final_output_high_vol = f"{lowest_price_candle['low']:.2f}({interval_name}, {time_str})"
-                else:
-                    output_parts = []
-                    def check_pair(c1, c2, name1, name2, threshold):
-                        if c1 and c2:
-                            low1, low2 = c1['low'], c2['low']
-                            if min(low1, low2) > 0 and abs(low1 - low2) / min(low1, low2) > threshold:
-                                time1 = c1['start_time'].strftime('%H:%M')
-                                time2 = c2['start_time'].strftime('%H:%M')
-                                return [f"{low1:.2f}({name1}, {time1})", f"{low2:.2f}({name2}, {time2})"]
-                        return None
-
-                    pair_result = check_pair(c_1h_hv, c_30m_hv, '1 Hour', '30 Min', 0.02)
-                    if pair_result: output_parts = pair_result
-                    elif not pair_result:
-                        pair_result = check_pair(c_1h_hv, c_15m_hv, '1 Hour', '15 Min', 0.02)
-                        if pair_result: output_parts = pair_result
-                    elif not pair_result:
-                        pair_result = check_pair(c_30m_hv, c_15m_hv, '30 Min', '15 Min', 0.02)
-                        if pair_result: output_parts = pair_result
-
-                    if output_parts:
-                        final_output_high_vol = ", ".join(sorted(output_parts, reverse=True))
-                    else:
-                        lowest_price_candle = min(available_candles_hv, key=lambda c: c['low'])
-                        interval_api = next(key for key, val in high_vol_candles.items() if val == lowest_price_candle)
-                        interval_name = CANDLE_INTERVAL_MAP_DISPLAY[interval_api]
-                        time_str = lowest_price_candle['start_time'].strftime('%H:%M')
-                        final_output_high_vol = f"{lowest_price_candle['low']:.2f}({interval_name}, {time_str})"
-        
-        # --- Phase 4: Format output for HIGHEST UP CANDLE output (Column X) ---
-        final_output_highest_up = ""
-        if highest_up_candle:
-            interval_name = CANDLE_INTERVAL_MAP_DISPLAY[highest_up_candle_interval_api]
-            time_str = highest_up_candle['start_time'].strftime('%H:%M')
-            final_output_highest_up = f"{highest_up_candle['low']:.2f}({interval_name}, {time_str})"
-
-        # --- Phase 5: Prepare updates for the sheet ---
+        # --- Phase 3: Prepare updates for the sheet, only if the value has changed ---
         for entry in symbol_entries:
             row, row_idx = entry["row"], entry["row"] - 1
 
-            new_value_3pct = final_output_3_pct
-            existing_value_3pct = pct_down_result_col_values[row_idx] if row_idx < len(pct_down_result_col_values) else ""
-            if str(existing_value_3pct).strip() != new_value_3pct.strip():
-                updates_queued.append({"range": f"{PCT_DOWN_RESULT_COL}{row}", "values": [[new_value_3pct]]})
+            if str(pct_down_result_col_values[row_idx] if row_idx < len(pct_down_result_col_values) else "").strip() != final_output_3_pct.strip():
+                updates_queued.append({"range": f"{PCT_DOWN_RESULT_COL}{row}", "values": [[final_output_3_pct]]})
 
-            new_value_high_vol = final_output_high_vol
-            existing_value_high_vol = high_volume_result_col_values[row_idx] if row_idx < len(high_volume_result_col_values) else ""
-            if str(existing_value_high_vol).strip() != new_value_high_vol.strip():
-                updates_queued.append({"range": f"{HIGH_VOL_RESULT_COL}{row}", "values": [[new_value_high_vol]]})
+            if str(high_volume_result_col_values[row_idx] if row_idx < len(high_volume_result_col_values) else "").strip() != final_output_high_vol.strip():
+                updates_queued.append({"range": f"{HIGH_VOL_RESULT_COL}{row}", "values": [[final_output_high_vol]]})
 
-            # NEW: Update for Highest Up Candle (Column X)
-            existing_highest_up = highest_up_col_values[row_idx] if row_idx < len(highest_up_col_values) else ""
-            if str(existing_highest_up).strip() != final_output_highest_up.strip():
+            if str(highest_up_col_values[row_idx] if row_idx < len(highest_up_col_values) else "").strip() != final_output_highest_up.strip():
                 updates_queued.append({"range": f"{HIGHEST_UP_CANDLE_COL}{row}", "values": [[final_output_highest_up]]})
 
     if updates_queued:
         Dashboard.batch_update(updates_queued)
-        logger.info(f"✅ Applied {len(updates_queued)} Price/Volume setup updates to Dashboard.")
+        logger.info(f"Applied {len(updates_queued)} Price/Volume setup updates to Dashboard.")
     else:
-        logger.info("ℹ️ No Price/Volume setup updates needed.")
+        logger.info("No Price/Volume setup updates needed.")
 
+
+def check_and_place_orders():
+    """
+    Scans the 'Orders' sheet for any rows marked 'PENDING',
+    places the trade via the SmartAPI, and updates the status.
+    """
+    try:
+        if not OrdersSheet:
+            logger.warning("OrdersSheet object not initialized. Skipping order check.")
+            return
+
+        all_values = OrdersSheet.get_all_values()
+        
+        header_row_index = -1
+        for i, row in enumerate(all_values):
+            if any(cell.strip() for cell in row):
+                header_row_index = i
+                break
+        
+        if header_row_index == -1 or len(all_values) <= header_row_index + 1:
+            return
+
+        headers = all_values[header_row_index]
+        data_rows = all_values[header_row_index + 1:]
+
+        orders_to_process = []
+        for row in data_rows:
+            padded_row = row + [''] * (len(headers) - len(row))
+            orders_to_process.append(dict(zip(headers, padded_row)))
+
+        if not orders_to_process:
+            return
+
+        logger.info(f"Scanning {len(orders_to_process)} data rows in the Orders sheet.")
+
+        for idx, order in enumerate(orders_to_process):
+            row_num = header_row_index + idx + 2
+            
+            if not order.get('Symbol', '').strip():
+                continue
+
+            if 'Status' not in order or str(order.get('Status', '')).strip().upper() != 'PENDING':
+                continue
+
+            logger.info(f"Found a pending order on row {row_num}: {order}")
+            try:
+                symbol = str(order['Symbol'])
+                exchange = str(order['Exchange'])
+                action = str(order['Action']).upper()
+                order_type = str(order['Order Type']).upper()
+                quantity = int(order['Quantity'])
+                trigger_price = float(order.get('Limit Price', 0))
+                
+                if not all([symbol, exchange, action, order_type, quantity]):
+                    raise ValueError("Missing one or more required fields")
+                if action not in ['BUY', 'SELL']:
+                    raise ValueError("Action must be 'BUY' or 'SELL'")
+                if order_type not in ['MARKET', 'LIMIT', 'STOPLOSS_MARKET']:
+                    raise ValueError("Order Type must be 'MARKET', 'LIMIT', or 'STOPLOSS_MARKET'")
+                if quantity <= 0:
+                    raise ValueError("Quantity must be positive")
+                if order_type in ['LIMIT', 'STOPLOSS_MARKET'] and trigger_price <= 0:
+                    raise ValueError("Trigger/Limit Price must be positive for this order type")
+                
+                token_cache = {}
+                token = get_or_fetch_token_for_symbol(symbol, exchange, smart_api_obj, token_cache)
+                if not token:
+                    raise ValueError(f"Could not find token for symbol {symbol}")
+
+                order_params = {
+                    "variety": "NORMAL",
+                    "tradingsymbol": symbol,
+                    "symboltoken": token,
+                    "transactiontype": action,
+                    "exchange": exchange,
+                    "ordertype": order_type,
+                    "producttype": "DELIVERY",
+                    "duration": "DAY",
+                    "quantity": quantity
+                }
+
+                if order_type == 'LIMIT':
+                    order_params["price"] = trigger_price
+                elif order_type == 'STOPLOSS_MARKET':
+                    order_params["triggerprice"] = trigger_price
+                    order_params["price"] = 0
+                else:
+                    order_params["price"] = 0.0
+
+                logger.info(f"Placing order with params: {order_params}")
+                response_data = smart_api_obj.placeOrder(order_params)
+                
+                if isinstance(response_data, dict) and response_data.get("status") and response_data.get("data", {}).get("orderid"):
+                    order_id = response_data["data"]["orderid"]
+                    logger.info(f"Successfully placed order for row {row_num}. Order ID: {order_id}")
+                    OrdersSheet.update(f'I{row_num}:J{row_num}', [['PLACED', str(order_id)]])
+                else:
+                    error_message = response_data.get("message") if isinstance(response_data, dict) else str(response_data)
+                    raise DataException(error_message)
+
+            except Exception as e:
+                error_text = str(e)
+                logger.error(f"Failed to place order for row {row_num}: {error_text}")
+                OrdersSheet.update(f'I{row_num}:J{row_num}', [['ERROR', error_text]])
+            
+            time.sleep(1)
+
+    except Exception as e:
+        logger.exception(f"An error occurred in the main order processing function: {e}")
 
 # =====================================================================================================================
 #
@@ -997,13 +1086,11 @@ def get_or_fetch_token_for_symbol(symbol_name, exchange_name, smart_api_obj, ses
     if not symbol_name or str(symbol_name).strip().upper() in ('SYMBOL', ''):
         return None
 
-    # Use a consistent key for the cache
     cache_key = (symbol_name.strip().upper(), exchange_name.strip().upper())
     if cache_key in session_cache:
         logger.debug(f"Using session-cached token for {symbol_name}.")
         return session_cache[cache_key]
 
-    # If not in session cache, always fetch from SmartAPI to ensure correctness.
     found_token = None
     symbol_clean = symbol_name.strip().upper()
     exchange_clean = exchange_name.strip().upper()
@@ -1012,7 +1099,6 @@ def get_or_fetch_token_for_symbol(symbol_name, exchange_name, smart_api_obj, ses
 
     for attempt in range(SCRIP_SEARCH_RETRY_ATTEMPTS):
         try:
-            # Add a delay *before* each API call to prevent rate limiting.
             time.sleep(0.4)
             search_response = smart_api_obj.searchScrip(exchange_for_search_api, search_term_api)
 
@@ -1023,7 +1109,7 @@ def get_or_fetch_token_for_symbol(symbol_name, exchange_name, smart_api_obj, ses
                         break
             if found_token:
                 logger.info(f"Successfully fetched token for {symbol_clean}: {found_token}")
-                break # Token found, exit retry loop
+                break
             else:
                 logger.warning(f"Could not find a token for '{symbol_clean}' in the search results (Attempt {attempt + 1}).")
 
@@ -1035,7 +1121,6 @@ def get_or_fetch_token_for_symbol(symbol_name, exchange_name, smart_api_obj, ses
     if not found_token:
         logger.error(f"Failed to fetch token for {symbol_name} after {SCRIP_SEARCH_RETRY_ATTEMPTS} retries.")
 
-    # If a token was found, add it to the session cache for this scan
     if found_token:
         session_cache[cache_key] = found_token
 
@@ -1053,43 +1138,32 @@ def scan_sheet_for_all_symbols(smart_api_obj, Dashboard, ATHCache):
     local_3pct_setup_details = collections.defaultdict(list)
     all_tokens_found = set()
     
-    # Add a temporary cache for this specific scan to avoid re-fetching the same token.
     scan_session_token_cache = {}
-
-    # Store expected state of ATH Cache based on current Dashboard symbols
-    expected_ath_cache_state = {} # Key: (row, col_letter), Value: token
-    ath_cache_updates_queued = [] # List of gspread batch update requests
+    expected_ath_cache_state = {}
+    ath_cache_updates_queued = []
 
     try:
         all_dashboard_values = Dashboard.get_all_values()
-        all_ath_cache_values = ATHCache.get_all_values() # Read ATH Cache once for comparison
+        all_ath_cache_values = ATHCache.get_all_values()
 
-        # FIX: Create a map of existing tokens from the ATH cache for quick lookup.
-        # Key: (row, col_letter), Value: (symbol_from_dashboard, token_from_ath_cache)
-        # This helps detect if a symbol has changed.
         symbol_token_map = {}
         for row_idx, row_data in enumerate(all_ath_cache_values):
             row_num = row_idx + 1
-            # Check Column Y
             if len(row_data) > col_to_num(ATH_CACHE_Y_COL_DASH) -1:
                 token = row_data[col_to_num(ATH_CACHE_Y_COL_DASH) - 1]
                 symbol = get_cell_value(all_dashboard_values, row_num, FOCUS_SYMBOL_COL)
                 if token and symbol:
                     symbol_token_map[(row_num, ATH_CACHE_Y_COL_DASH)] = (symbol.strip().upper(), token)
-            # Check Column Z
             if len(row_data) > col_to_num(ATH_CACHE_Z_COL_DASH) -1:
                 token = row_data[col_to_num(ATH_CACHE_Z_COL_DASH) - 1]
                 symbol = get_cell_value(all_dashboard_values, row_num, FULL_SYMBOL_COL)
                 if token and symbol:
                     symbol_token_map[(row_num, ATH_CACHE_Z_COL_DASH)] = (symbol.strip().upper(), token)
 
-
         end_row_focus_list = INDEX_START_ROW - 1
         end_row_full_positions = QUARTER_POSITIONS_START_ROW - 1
-        max_row_dashboard = get_last_row_in_column(Dashboard, FULL_SYMBOL_COL) # Get max row from dashboard for scanning
+        max_row_dashboard = get_last_row_in_column(Dashboard, FULL_SYMBOL_COL)
 
-        # --- Phase 1: Scan Dashboard and determine expected ATH Cache state ---
-        # Iterate up to a reasonable max row to catch all potential dashboard entries
         for row in range(START_ROW_DATA, max_row_dashboard + 20): 
             
             def process_symbol(symbol, exchange, row_num, token_col, block_details):
@@ -1097,16 +1171,13 @@ def scan_sheet_for_all_symbols(smart_api_obj, Dashboard, ATHCache):
                     return
 
                 token = None
-                # Check if the symbol has changed compared to our initial map
                 map_key = (row_num, token_col)
                 cached_info = symbol_token_map.get(map_key)
 
                 if cached_info and cached_info[0] == symbol.strip().upper():
-                    # Symbol is the same as before, trust the cached token
                     token = cached_info[1]
                     logger.debug(f"Using trusted token {token} for unchanged symbol {symbol} at {map_key}")
                 else:
-                    # Symbol is new or has changed, must fetch from API
                     if cached_info:
                         logger.info(f"Symbol changed at {map_key}: from '{cached_info[0]}' to '{symbol.strip().upper()}'. Fetching new token.")
                     else:
@@ -1115,9 +1186,9 @@ def scan_sheet_for_all_symbols(smart_api_obj, Dashboard, ATHCache):
                 
                 if token:
                     all_tokens_found.add(token)
-                    if 'ltp_col' in block_details: # Dashboard item
+                    if 'ltp_col' in block_details:
                         local_dashboard_details[token].append({'row': row_num, 'symbol': symbol, 'exchange': exchange, **block_details})
-                    if 'setup_type' in block_details: # Setup item
+                    if 'setup_type' in block_details:
                         exchange_type_int = {'NSE': 1, 'BSE': 3}.get(str(exchange).strip().upper())
                         if exchange_type_int:
                             if block_details['setup_type'] == 'ORH':
@@ -1126,82 +1197,63 @@ def scan_sheet_for_all_symbols(smart_api_obj, Dashboard, ATHCache):
                                 local_3pct_setup_details[token].append({'symbol': symbol, 'row': row_num, 'pct_down_col': PCT_DOWN_RESULT_COL, 'exchange_type': exchange_type_int})
                     expected_ath_cache_state[map_key] = token
 
-
-            # Focus List (Column C)
             if row <= end_row_focus_list:
                 exchange = get_cell_value(all_dashboard_values, row, FOCUS_EXCHANGE_COL)
                 symbol = get_cell_value(all_dashboard_values, row, FOCUS_SYMBOL_COL)
                 process_symbol(symbol, exchange, row, ATH_CACHE_Y_COL_DASH, {
-                    'ltp_col': FOCUS_LTP_COL, 
-                    'chg_col': FOCUS_CHG_COL, 
-                    'block_type': 'Focus List',
-                    'symbol_col': FOCUS_SYMBOL_COL,
-                    'token_cache_col': ATH_CACHE_Y_COL_DASH
+                    'ltp_col': FOCUS_LTP_COL, 'chg_col': FOCUS_CHG_COL, 'block_type': 'Focus List',
+                    'symbol_col': FOCUS_SYMBOL_COL, 'token_cache_col': ATH_CACHE_Y_COL_DASH
                 })
 
-            # Full Positions (Column M)
             if row <= end_row_full_positions:
                 exchange = get_cell_value(all_dashboard_values, row, FULL_EXCHANGE_COL)
                 symbol = get_cell_value(all_dashboard_values, row, FULL_SYMBOL_COL)
                 process_symbol(symbol, exchange, row, ATH_CACHE_Z_COL_DASH, {
                     'ltp_col': FULL_LTP_COL, 'chg_col': '', 'block_type': 'Full Positions', 
-                    'symbol_col': FULL_SYMBOL_COL,
-                    'token_cache_col': ATH_CACHE_Z_COL_DASH,
+                    'symbol_col': FULL_SYMBOL_COL, 'token_cache_col': ATH_CACHE_Z_COL_DASH,
                     'price_col': FULL_PRICE_COL, 'qty_col': FULL_QTY_COL, 
-                    'return_amt_col': FULL_RETURN_AMT_COL, 
-                    'return_pct_col': FULL_RETURN_PCT_COL,
-                    'highest_up_candle_col': HIGHEST_UP_CANDLE_COL, # NEW
-                    'percent_from_high_col': FULL_PERCENT_FROM_HIGH_COL, 'entry_date_col': FULL_ENTRY_DATE_COL, 
+                    'return_amt_col': FULL_RETURN_AMT_COL, 'return_pct_col': FULL_RETURN_PCT_COL,
+                    'swing_low_input_col': SWING_LOW_INPUT_COL, 'percent_from_swing_low_col': PERCENT_FROM_SWING_LOW_COL,
+                    'highest_up_candle_col': HIGHEST_UP_CANDLE_COL, 'entry_date_col': FULL_ENTRY_DATE_COL, 
                     'days_duration_col': FULL_DAYS_DURATION_COL
                 })
 
-            # ORH Setup (Column C, token in Y)
             exchange_orh = get_cell_value(all_dashboard_values, row, ORH_EXCHANGE_COL)
             symbol_orh = get_cell_value(all_dashboard_values, row, ORH_SYMBOL_COL)
             if exchange_orh and symbol_orh and row <= ORH_MAX_ROW:
                 process_symbol(symbol_orh, exchange_orh, row, ORH_TOKEN_COL, {'setup_type': 'ORH'})
             
-            # 3% Down Setup (Column M, token in Z)
             exchange_3pct = get_cell_value(all_dashboard_values, row, PCT_EXCHANGE_COL_3PCT)
             symbol_3pct = get_cell_value(all_dashboard_values, row, PCT_SYMBOL_COL_3PCT)
             if exchange_3pct and symbol_3pct:
                 process_symbol(symbol_3pct, exchange_3pct, row, PCT_TOKEN_COL_3PCT, {'setup_type': '3PCT'})
 
-        # --- Phase 2: Compare and Queue ATH Cache Updates ---
         max_row_ath_cache_data = len(all_ath_cache_values) if all_ath_cache_values else 0
         rows_to_check_ath_cache = max(max_row_dashboard + 20, max_row_ath_cache_data + 1)
-
         token_cols_to_check = [ATH_CACHE_Y_COL_DASH, ATH_CACHE_Z_COL_DASH]
 
         for row_idx in range(rows_to_check_ath_cache):
             row_num = row_idx + 1 
-
             for col_letter in token_cols_to_check:
                 current_token_in_ath_cache = get_cell_value(all_ath_cache_values, row_num, col_letter)
                 expected_token_for_row_col = expected_ath_cache_state.get((row_num, col_letter))
 
                 if expected_token_for_row_col is None:
                     if current_token_in_ath_cache is not None and str(current_token_in_ath_cache).strip() != '':
-                        ath_cache_updates_queued.append({
-                            'range': f"{col_letter}{row_num}",
-                            'values': [['']] 
-                        })
-                        logger.info(f"Queued clearing token in ATH Cache cell {col_letter}{row_num} (was '{current_token_in_ath_cache}') as symbol is no longer in Dashboard at this location.")
+                        ath_cache_updates_queued.append({'range': f"{col_letter}{row_num}", 'values': [['']]})
+                        logger.info(f"Queued clearing token in ATH Cache cell {col_letter}{row_num} (was '{current_token_in_ath_cache}')")
                 elif str(expected_token_for_row_col).strip() != str(current_token_in_ath_cache).strip():
-                    ath_cache_updates_queued.append({
-                        'range': f"{col_letter}{row_num}",
-                        'values': [[int(expected_token_for_row_col)]] 
-                    })
+                    ath_cache_updates_queued.append({'range': f"{col_letter}{row_num}", 'values': [[int(expected_token_for_row_col)]]})
                     logger.info(f"Queued updating token in ATH Cache cell {col_letter}{row_num} from '{current_token_in_ath_cache}' to '{expected_token_for_row_col}'.")
 
         if ath_cache_updates_queued:
             try:
                 ATHCache.batch_update(ath_cache_updates_queued)
-                logger.info(f"✅ Applied {len(ath_cache_updates_queued)} batch updates to ATH Cache sheet.")
+                logger.info(f"Applied {len(ath_cache_updates_queued)} batch updates to ATH Cache sheet.")
             except Exception as e:
                 logger.exception(f"An error occurred during batch update to ATH Cache sheet: {e}")
         else:
-            logger.info("ℹ️ No ATH Cache updates needed.")
+            logger.info("No ATH Cache updates needed.")
 
     except Exception as e:
         logger.exception(f"Error during unified symbol scan and ATH Cache management: {e}")
@@ -1212,26 +1264,25 @@ def scan_sheet_for_all_symbols(smart_api_obj, Dashboard, ATHCache):
 
 def update_excel_live_data():
     """
-    Updates the Google Sheet with live data for the dashboard portion, including all calculations.
+    Updates the Google Sheet with live data and the new Swing Low calculation.
     """
     global cells_to_clear_color
     
     with data_lock:
         dashboard_details_copy = excel_dashboard_details.copy()
+        monthly_high_cache_copy = monthly_high_cache.copy()
 
     if not smart_ws or not smart_ws._is_connected_flag:
         logger.warning("WebSocket not connected. Skipping Google Sheet update.")
         return
 
     requests = []
-    # MODIFIED: The red color code has been changed as per your request.
     GREEN_COLOR, RED_COLOR = (149, 203, 186), (254, 112, 112)
+    YELLOW_COLOR = (249, 203, 156) # Define yellow color for swing low
     dashboard_sheet_id = Dashboard.id
-    ath_cache_sheet_id = ATHCache.id
     
     cells_to_color_this_cycle = set()
 
-    # --- Part 1: Clear colors from the previous cycle ---
     if cells_to_clear_color:
         for cell_a1 in cells_to_clear_color:
             col_letter = ''.join(filter(str.isalpha, cell_a1))
@@ -1241,13 +1292,10 @@ def update_excel_live_data():
     
     cells_to_clear_color.clear()
 
-
-    # --- Part 2: Fetch input data and prepare new updates ---
     input_ranges = []
     for list_of_details in dashboard_details_copy.values():
         for details in list_of_details:
             row_num = details['row']
-            # Always fetch the symbol column for the clear check
             if details.get("symbol_col"): 
                 input_ranges.append(f'{details["symbol_col"]}{row_num}')
             
@@ -1255,13 +1303,7 @@ def update_excel_live_data():
                 if details.get("price_col"): input_ranges.append(f'{details["price_col"]}{row_num}')
                 if details.get("qty_col"): input_ranges.append(f'{details["qty_col"]}{row_num}')
                 if details.get("entry_date_col"): input_ranges.append(f'{details["entry_date_col"]}{row_num}')
-                # NEW: Add confirmation columns to the input ranges to prevent unnecessary writes
-                input_ranges.append(f'{HIGHEST_UP_CANDLE_COL}{row_num}')
-                input_ranges.append(f'{HIGHEST_UP_CANDLE_STATUS_COL}{row_num}')
-                input_ranges.append(f'{PCT_DOWN_RESULT_COL}{row_num}')
-                input_ranges.append(f'{PCT_DOWN_STATUS_COL}{row_num}')
-                input_ranges.append(f'{HIGH_VOL_RESULT_COL}{row_num}')
-                input_ranges.append(f'{HIGH_VOL_STATUS_COL}{row_num}')
+                if details.get("swing_low_input_col"): input_ranges.append(f'{details["swing_low_input_col"]}{row_num}')
     
     input_data = {}
     if input_ranges:
@@ -1276,10 +1318,7 @@ def update_excel_live_data():
             logger.error(f"Error fetching dashboard input data in batch: {e}")
 
     for token, list_of_details in dashboard_details_copy.items():
-        if token not in latest_tick_data:
-            continue
-            
-        current_ltp = latest_tick_data[token].get('ltp')
+        current_ltp = latest_tick_data.get(token, {}).get('ltp')
         if current_ltp is None: continue
 
         previous_ltp = previous_ltp_data.get(token)
@@ -1291,91 +1330,26 @@ def update_excel_live_data():
         for details in list_of_details:
             row_num = details['row']
             
-            # Fast clearing logic for both "Focus List" and "Full Positions"
-            symbol_in_memory = details.get('symbol', '').strip().upper()
-            symbol_on_sheet_raw = input_data.get(f"{details.get('symbol_col')}{row_num}")
-            symbol_on_sheet = str(symbol_on_sheet_raw).strip().upper() if symbol_on_sheet_raw else ""
-
-            # Trigger clear if the symbol is blank OR if it has changed from what's in memory
-            if not symbol_on_sheet or (symbol_on_sheet != symbol_in_memory):
-                if details.get('block_type') == "Focus List":
-                    start_col, end_col = 'D', 'I'
-                elif details.get('block_type') == "Full Positions":
-                    start_col, end_col = 'N', 'AF'
-                else:
-                    continue # Not a block we need to clear
-
-                log_msg = f"Detected cleared symbol at row {row_num}." if not symbol_on_sheet else f"Detected updated symbol at row {row_num} from '{symbol_in_memory}' to '{symbol_on_sheet}'."
-                logger.info(f"{log_msg} Queuing fast clear for {start_col}{row_num}:{end_col}{row_num}.")
-                
-                # Request 1: Clear the Dashboard data range (values and background color only)
-                requests.append({
-                    "repeatCell": {
-                        "range": {
-                            "sheetId": dashboard_sheet_id,
-                            "startRowIndex": row_num - 1, "endRowIndex": row_num,
-                            "startColumnIndex": col_to_num(start_col) - 1, "endColumnIndex": col_to_num(end_col)
-                        },
-                        "cell": {
-                            "userEnteredValue": {},
-                            "userEnteredFormat": { "backgroundColor": rgb_to_float(None) }
-                        }, 
-                        "fields": "userEnteredValue,userEnteredFormat.backgroundColor"
-                    }
-                })
-                # Request 2: Clear the corresponding token in the ATH Cache sheet
-                token_cache_col = details.get('token_cache_col')
-                if token_cache_col:
-                    logger.info(f"Also queueing fast clear for ATH Cache cell {token_cache_col}{row_num}.")
-                    requests.append({
-                        "repeatCell": {
-                            "range": {
-                                "sheetId": ath_cache_sheet_id,
-                                "startRowIndex": row_num - 1, "endRowIndex": row_num,
-                                "startColumnIndex": col_to_num(token_cache_col) - 1, "endColumnIndex": col_to_num(token_cache_col)
-                            },
-                            "cell": {}, "fields": "userEnteredValue"
-                        }
-                    })
-                # If the symbol cell itself was completely cleared, add a request to clear it too
-                if not symbol_on_sheet:
-                    symbol_col = details.get('symbol_col')
-                    if symbol_col:
-                        requests.append({
-                            "repeatCell": {
-                                "range": {
-                                    "sheetId": dashboard_sheet_id,
-                                    "startRowIndex": row_num - 1, "endRowIndex": row_num,
-                                    "startColumnIndex": col_to_num(symbol_col) - 1, "endColumnIndex": col_to_num(symbol_col)
-                                },
-                                "cell": {}, "fields": "userEnteredValue"
-                            }
-                        })
-                continue # Skip all further processing for this cleared row
-
             def queue_update(col_letter, value, number_format_pattern=None, bg_color=None, is_ltp=False):
                 if not col_letter: return
                 cell_a1 = f"{col_letter}{row_num}"
                 cell_range = {"sheetId": dashboard_sheet_id, "startRowIndex": row_num - 1, "endRowIndex": row_num, "startColumnIndex": col_to_num(col_letter) - 1, "endColumnIndex": col_to_num(col_letter)}
+                cell_data, fields = {}, []
                 user_entered_value = {}
                 if isinstance(value, (int, float)): user_entered_value["numberValue"] = value
                 else: user_entered_value["stringValue"] = str(value)
-                
-                requests.append({"updateCells": {"rows": [{"values": [{"userEnteredValue": user_entered_value}]}], "fields": "userEnteredValue", "range": cell_range}})
-                
+                cell_data["userEnteredValue"] = user_entered_value
+                fields.append("userEnteredValue")
                 user_entered_format = {}
                 if bg_color:
                     user_entered_format["backgroundColor"] = rgb_to_float(bg_color)
-                    if is_ltp:
-                        cells_to_color_this_cycle.add(cell_a1)
-                
+                    if is_ltp: cells_to_color_this_cycle.add(cell_a1)
                 if number_format_pattern:
                     user_entered_format["numberFormat"] = {"type": "NUMBER" if isinstance(value, (int, float)) else "TEXT", "pattern": number_format_pattern}
-                
                 if user_entered_format:
-                    fields = ",".join([f"userEnteredFormat.{k}" for k in user_entered_format.keys()])
-                    requests.append({"repeatCell": {"range": cell_range, "cell": {"userEnteredFormat": user_entered_format}, "fields": fields}})
-
+                    cell_data["userEnteredFormat"] = user_entered_format
+                    for key in user_entered_format.keys(): fields.append(f"userEnteredFormat.{key}")
+                requests.append({"updateCells": {"rows": [{"values": [cell_data]}], "fields": ",".join(fields), "range": cell_range}})
 
             queue_update(details.get('ltp_col'), current_ltp, "#,##0.00", ltp_cell_color, is_ltp=True)
             
@@ -1390,10 +1364,8 @@ def update_excel_live_data():
                     price_val_str = str(input_data.get(f'{details["price_col"]}{row_num}') or '0').replace(',','')
                     qty_val_str = str(input_data.get(f'{details["qty_col"]}{row_num}') or '0').replace(',','')
                     entry_date_str = input_data.get(f'{details["entry_date_col"]}{row_num}')
-                    
                     price_val = float(price_val_str) if price_val_str else 0
                     qty_val = float(qty_val_str) if qty_val_str else 0
-
                 except (ValueError, TypeError) as e:
                     logger.warning(f"Could not parse numeric values for row {row_num}. Error: {e}"); continue
                 
@@ -1402,87 +1374,135 @@ def update_excel_live_data():
                     return_pct = (current_ltp - price_val) / price_val if price_val != 0 else 0
                     queue_update(details.get('return_amt_col'), return_amt, "#,##0.00", GREEN_COLOR if return_amt > 0 else RED_COLOR if return_amt < 0 else None)
                     queue_update(details.get('return_pct_col'), return_pct, "0.00%", GREEN_COLOR if return_pct > 0 else RED_COLOR if return_pct < 0 else None)
-                else:
-                    queue_update(details.get('return_amt_col'), "", "General", bg_color=None)
-                    queue_update(details.get('return_pct_col'), "", "General", bg_color=None)
-                    for col_key in ['return_amt_col', 'return_pct_col']:
-                        col_letter = details.get(col_key)
-                        if col_letter:
-                            cell_range = {"sheetId": dashboard_sheet_id, "startRowIndex": row_num - 1, "endRowIndex": row_num, "startColumnIndex": col_to_num(col_letter) - 1, "endColumnIndex": col_to_num(col_letter)}
-                            requests.append({"repeatCell": {"range": cell_range, "cell": {"userEnteredFormat": {"backgroundColor": rgb_to_float(None)}}, "fields": "userEnteredFormat.backgroundColor"}})
+                
+                # --- New Swing Low Logic ---
+                swing_low_str = str(input_data.get(f'{details.get("swing_low_input_col")}{row_num}') or '').replace(',','')
+                swing_low_val = None
+                try:
+                    if swing_low_str: swing_low_val = float(swing_low_str)
+                except (ValueError, TypeError):
+                    queue_update(details.get('percent_from_swing_low_col'), "Invalid Low", "@")
 
-                if token in twenty_five_day_high_cache:
-                    high_25_day = twenty_five_day_high_cache[token]
-                    if high_25_day > 0:
-                        percent_from_high = (current_ltp - high_25_day) / high_25_day
-                        queue_update(details.get('percent_from_high_col'), percent_from_high, "0.00%")
-                else:
-                    queue_update(details.get('percent_from_high_col'), "", "General")
+                if swing_low_val is not None and swing_low_val > 0:
+                    monthly_high = monthly_high_cache_copy.get(token)
+                    if monthly_high and monthly_high > 0:
+                        percent_from_high = (monthly_high - swing_low_val) / swing_low_val
+                        cell_color = YELLOW_COLOR if percent_from_high >= 0.35 else None
+                        queue_update(details.get('percent_from_swing_low_col'), percent_from_high, "0.00%", bg_color=cell_color)
+                    else:
+                        queue_update(details.get('percent_from_swing_low_col'), "No High", "@")
+                else: # Clear the cell if input is removed or invalid
+                    queue_update(details.get('percent_from_swing_low_col'), "", "General", bg_color=None)
 
                 days_duration = ""
                 if entry_date_str:
-                    try:
-                        days_duration = f"{(datetime.datetime.now() - datetime.datetime.strptime(entry_date_str, '%d-%b-%y')).days} Days"
+                    try: days_duration = f"{(datetime.datetime.now() - datetime.datetime.strptime(entry_date_str, '%d-%b-%y')).days} Days"
                     except ValueError: days_duration = "Invalid Date"
                 queue_update(details.get('days_duration_col'), days_duration, "@")
-
-                # --- NEW Confirmation Logic with Coloring ---
-                def get_confirmation_status_and_color(cell_text, ltp):
-                    if not cell_text or not isinstance(cell_text, str):
-                        return "", None
-                    
-                    prices_str = re.findall(r"(\d+\.\d+)", cell_text)
-                    if not prices_str:
-                        return "", None
-                    
-                    prices = [float(p) for p in prices_str]
-                    statuses = []
-                    for price in prices:
-                        if ltp > price:
-                            statuses.append("Above")
-                        else:
-                            statuses.append("Below")
-                    
-                    status_text = "/".join(statuses)
-                    
-                    # Determine color based on the first status
-                    color = None
-                    if status_text.startswith("Above"):
-                        color = GREEN_COLOR
-                    elif status_text.startswith("Below"):
-                        color = RED_COLOR
-                        
-                    return status_text, color
-
-                # Highest Up Candle Confirmation (X -> Y)
-                x_text = input_data.get(f'{HIGHEST_UP_CANDLE_COL}{row_num}')
-                y_status, y_color = get_confirmation_status_and_color(x_text, current_ltp)
-                existing_y_status = input_data.get(f'{HIGHEST_UP_CANDLE_STATUS_COL}{row_num}')
-                if str(y_status) != str(existing_y_status or ''):
-                     queue_update(HIGHEST_UP_CANDLE_STATUS_COL, y_status, "@", bg_color=y_color)
-
-                # 3% Down Confirmation (AA -> AB)
-                aa_text = input_data.get(f'{PCT_DOWN_RESULT_COL}{row_num}')
-                ab_status, ab_color = get_confirmation_status_and_color(aa_text, current_ltp)
-                existing_ab_status = input_data.get(f'{PCT_DOWN_STATUS_COL}{row_num}')
-                if str(ab_status) != str(existing_ab_status or ''):
-                     queue_update(PCT_DOWN_STATUS_COL, ab_status, "@", bg_color=ab_color)
-
-                # High Volume Confirmation (AC -> AD)
-                ac_text = input_data.get(f'{HIGH_VOL_RESULT_COL}{row_num}')
-                ad_status, ad_color = get_confirmation_status_and_color(ac_text, current_ltp)
-                existing_ad_status = input_data.get(f'{HIGH_VOL_STATUS_COL}{row_num}')
-                if str(ad_status) != str(existing_ad_status or ''):
-                     queue_update(HIGH_VOL_STATUS_COL, ad_status, "@", bg_color=ad_color)
     
-    cells_to_clear_color = cells_to_color_this_cycle
-
     if requests:
         try:
             gsheet.batch_update({'requests': requests})
             logger.info(f"Executed {len(requests)} batch update operations on Google Sheet for dashboard.")
         except Exception as e:
             logger.exception(f"An error occurred during batch update to Google Sheet: {e}")
+
+def check_and_update_breakdown_status():
+    """
+    Checks the status of price/volume setups based on the last completed candle.
+    Updates the status column to "Breakdown" or clears it.
+    """
+    logger.info("Checking for breakdown status based on last completed candle close...")
+    updates_queued = []
+    
+    with data_lock:
+        setup_details_copy = excel_3pct_setup_details.copy()
+        volume_history_copy = volume_history_3pct.copy()
+
+    if not setup_details_copy:
+        return
+
+    rev_interval_map = {v: k for k, v in CANDLE_INTERVAL_MAP_DISPLAY.items()}
+    
+    setups_to_check = [
+        {'result_col': HIGHEST_UP_CANDLE_COL, 'status_col': HIGHEST_UP_CANDLE_STATUS_COL},
+        {'result_col': HIGH_VOL_RESULT_COL, 'status_col': HIGH_VOL_STATUS_COL},
+        {'result_col': PCT_DOWN_RESULT_COL, 'status_col': PCT_DOWN_STATUS_COL}
+    ]
+
+    try:
+        all_cols = [s['result_col'] for s in setups_to_check] + [s['status_col'] for s in setups_to_check]
+        start_col = min(all_cols, key=col_to_num)
+        end_col = max(all_cols, key=col_to_num)
+        
+        last_row = max(e['row'] for token, entries in setup_details_copy.items() for e in entries if entries)
+        if last_row < START_ROW_DATA:
+            return
+
+        range_to_get = f"{start_col}{START_ROW_DATA}:{end_col}{last_row}"
+        sheet_data = Dashboard.get(range_to_get, value_render_option='FORMATTED_VALUE').all()
+
+    except Exception as e:
+        logger.error(f"Failed to fetch setup data from Google Sheet: {e}")
+        return
+
+    for token, symbol_entries in setup_details_copy.items():
+        for entry in symbol_entries:
+            row = entry["row"]
+            row_idx = row - START_ROW_DATA
+
+            if row_idx < 0 or row_idx >= len(sheet_data):
+                continue
+
+            for setup in setups_to_check:
+                result_col_letter = setup['result_col']
+                status_col_letter = setup['status_col']
+
+                result_col_idx = col_to_num(result_col_letter) - col_to_num(start_col)
+                status_col_idx = col_to_num(status_col_letter) - col_to_num(start_col)
+
+                signal_text = sheet_data[row_idx][result_col_idx] if len(sheet_data[row_idx]) > result_col_idx else ""
+                current_status = sheet_data[row_idx][status_col_idx] if len(sheet_data[row_idx]) > status_col_idx else ""
+                
+                signals = re.findall(r"(\d+\.?\d*)\s*\(([^)]+)\)", str(signal_text))
+                
+                is_any_breakdown = False
+                if signals:
+                    for low_str, timeframe_str in signals:
+                        signal_low = float(low_str)
+                        api_timeframe = rev_interval_map.get(timeframe_str.strip())
+                        
+                        if not api_timeframe:
+                            continue
+
+                        candle_history = volume_history_copy.get(token, {}).get(api_timeframe)
+                        # FIX: Check the last candle in the list, which is the most recently completed one.
+                        if not candle_history:
+                            continue
+                        
+                        last_completed_candle = candle_history[-1]
+                        
+                        if last_completed_candle['close'] < signal_low:
+                            is_any_breakdown = True
+                            break
+
+                new_status = "Breakdown" if is_any_breakdown else ""
+                
+                if new_status != current_status.strip():
+                    logger.info(f"Status change for {entry['symbol']} at row {row}, {setup['status_col']}: from '{current_status}' to '{new_status}'")
+                    updates_queued.append({
+                        "range": f"{status_col_letter}{row}",
+                        "values": [[new_status]]
+                    })
+                    bg_color = rgb_to_float((254, 112, 112)) if new_status == "Breakdown" else rgb_to_float(None)
+                    updates_queued.append({
+                        'range': f"{status_col_letter}{row}",
+                        'format': {'backgroundColor': bg_color}
+                    })
+
+    if updates_queued:
+        Dashboard.batch_update(updates_queued, value_input_option='USER_ENTERED')
+        logger.info(f"Applied {len(updates_queued)} breakdown status updates to Dashboard.")
 
 # =====================================================================================================================
 #
@@ -1495,7 +1515,7 @@ def run_live_dashboard_updater():
     This function runs in a dedicated thread to continuously update the Google Sheet
     with the latest prices, ensuring the dashboard is always live and responsive.
     """
-    logger.info("✅ Live dashboard updater thread started.")
+    logger.info("Live dashboard updater thread started.")
     while True:
         try:
             update_excel_live_data()
@@ -1510,70 +1530,53 @@ def run_quote_updater():
     (including percentChange) for all symbols using the REST API.
     """
     global latest_quote_data
-    logger.info("✅ Quote updater thread started.")
+    logger.info("Quote updater thread started.")
     while True:
         try:
             with data_lock:
-                # Create a safe copy of the dashboard details to identify focus list tokens
                 dashboard_details_copy = excel_dashboard_details.copy()
 
-            focus_list_tokens = {} # Using a dict to store token -> exchange mapping
+            focus_list_tokens = {}
             for token, details_list in dashboard_details_copy.items():
                 for details in details_list:
                     if details.get('block_type') == 'Focus List':
                         exchange_name = details.get("exchange", "NSE").upper()
                         focus_list_tokens[token] = exchange_name
-                        break # Found it for this token, no need to check other entries
+                        break
 
             if not focus_list_tokens:
                 time.sleep(5)
                 continue
 
-            # Group tokens by exchange for batching
             tokens_by_exchange = collections.defaultdict(list)
             for token, exchange in focus_list_tokens.items():
                 tokens_by_exchange[exchange].append(token)
 
             new_quote_data = {}
             
-            # Iterate through each exchange and batch tokens for API calls
             for exchange, tokens_list in tokens_by_exchange.items():
-                # Split tokens into batches if they exceed the limit
                 for i in range(0, len(tokens_list), QUOTE_API_MAX_TOKENS):
                     batch_tokens = tokens_list[i:i + QUOTE_API_MAX_TOKENS]
-                    
-                    payload = {
-                        "mode": "FULL",
-                        "exchangeTokens": {
-                            exchange: batch_tokens
-                        }
-                    }
+                    payload = {"mode": "FULL", "exchangeTokens": {exchange: batch_tokens}}
                     
                     logger.info(f"Fetching market data for {len(batch_tokens)} tokens on {exchange}...")
                     response = smart_api_obj.getMarketData(**payload)
 
-                    # Process the response for the current batch
                     if response and response.get("status") and isinstance(response.get("data"), dict):
                         fetched_data = response["data"].get("fetched", [])
                         for item in fetched_data:
                             if isinstance(item, dict):
                                 token = item.get("symbolToken")
                                 if token:
-                                    new_quote_data[token] = {
-                                        "percentChange": item.get("percentChange"),
-                                        "netChange": item.get("netChange"),
-                                    }
+                                    new_quote_data[token] = {"percentChange": item.get("percentChange"), "netChange": item.get("netChange")}
                     else:
                         logger.warning(f"Could not fetch quote data for batch (Exchange: {exchange}, Tokens: {batch_tokens}). Response: {response}")
                     
-                    # Add a small delay between batches to avoid hitting rate limits too quickly
                     time.sleep(0.5)
 
-            # Safely update the global quote data dictionary with all fetched data
             with data_lock:
                 latest_quote_data.update(new_quote_data)
 
-            # Wait for a few seconds before the next major API call to avoid overall rate limiting
             time.sleep(3)
 
         except Exception as e:
@@ -1585,31 +1588,27 @@ def run_initial_setup_data_fetch():
     This function now runs in a dedicated thread to fetch all historical data
     for the setups without blocking the main application startup.
     """
-    logger.info("⚙️ Starting background fetch for initial setup data...")
+    logger.info("Starting background fetch for initial setup data...")
     
-    # FIX: Removed the is_market_hours() check to allow testing at any time.
     with data_lock:
         orh_details_copy = excel_setup_details.copy()
         pct3_details_copy = excel_3pct_setup_details.copy()
-        # Get a copy of full positions for the 25-day high fetch
-        full_positions_copy = {
-            token: details[0] for token, details in excel_dashboard_details.items() 
-            if details and details[0].get('block_type') == 'Full Positions'
-        }
 
-    # Fetch data for ORH setup
     fetch_initial_candle_data(smart_api_obj, orh_details_copy)
     fetch_previous_day_candle_data(smart_api_obj, orh_details_copy)
     
-    # Fetch data for 3% Down setup
     unique_tokens_3pct = list(set([(token, details[0]['exchange_type']) for token, details in pct3_details_copy.items() if details]))
     for interval_api in CANDLE_INTERVALS_3PCT_API:
         fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_3pct, interval_api)
     
-    # NEW: Fetch data for % from High setup
-    fetch_25_day_high(smart_api_obj, full_positions_copy)
-
-    logger.info("✅ Background fetch for initial setup data complete.")
+    # Fetch monthly data for swing low calculation
+    fetch_monthly_highs(smart_api_obj, unique_tokens_3pct)
+    
+    # After initial fetch, run the checks
+    check_and_update_price_volume_setups()
+    check_and_update_breakdown_status()
+    
+    logger.info("Background fetch for initial setup data complete.")
 
 
 def run_background_task_scheduler():
@@ -1618,47 +1617,35 @@ def run_background_task_scheduler():
     scheduled tasks like scanning the sheet for new symbols and checking for trade setups.
     """
     global subscribed_tokens, excel_dashboard_details, excel_setup_details, excel_3pct_setup_details
-    logger.info("✅ Background task scheduler thread started.")
+    logger.info("Background task scheduler thread started.")
     
-    last_checked_minute_orh, last_checked_minute_15min, last_checked_minute_30min, last_checked_minute_1hr, last_checked_minute_confirmation = None, None, None, None, None
+    last_checked_minute_orh, last_checked_minute_15min, last_checked_minute_30min, last_checked_minute_1hr = None, None, None, None
     last_scan_time = 0
     
-    # The initial, slow data fetch is now moved to its own thread (`run_initial_setup_data_fetch`)
-    # This allows the scheduler to start immediately.
-
     while True:
         try:
+            check_and_place_orders()
+            
             now = datetime.datetime.now()
             current_minute = now.minute
 
-            # --- Periodically re-scan Google Sheet and manage subscriptions ---
-            if time.time() - last_scan_time > 15: # Scan every 15 seconds
+            if time.time() - last_scan_time > 15:
                 logger.info("Rescanning Google Sheet for symbol changes...")
-                
                 new_dashboard, new_orh, new_3pct, current_excel_tokens = scan_sheet_for_all_symbols(smart_api_obj, Dashboard, ATHCache)
-                
                 with data_lock:
                     excel_dashboard_details = new_dashboard
                     excel_setup_details = new_orh
                     excel_3pct_setup_details = new_3pct
                 
-                # Check for new tokens that need a subscription
                 tokens_to_subscribe = current_excel_tokens - subscribed_tokens
                 if tokens_to_subscribe and smart_ws and smart_ws._is_connected_flag:
                     subscribe_list_grouped = collections.defaultdict(list)
-                    # This check is now redundant since we subscribe immediately at startup, but good for dynamic additions
                     for token in tokens_to_subscribe:
                         with data_lock:
-                            # Determine exchange type from any of the detail dicts
-                            if token in excel_dashboard_details and excel_dashboard_details[token]:
-                                exchange_type_num = {'NSE': 1, 'BSE': 3, 'NFO': 2}.get(excel_dashboard_details[token][0].get('exchange', 'NSE').upper(), 1)
-                            elif token in excel_setup_details and excel_setup_details[token]:
-                                 exchange_type_num = excel_setup_details[token][0].get('exchange_type', 1)
-                            elif token in excel_3pct_setup_details and excel_3pct_setup_details[token]:
-                                 exchange_type_num = excel_3pct_setup_details[token][0].get('exchange_type', 1)
-                            else:
-                                exchange_type_num = 1 # Default to NSE
-                        
+                            if token in excel_dashboard_details and excel_dashboard_details[token]: exchange_type_num = {'NSE': 1, 'BSE': 3, 'NFO': 2}.get(excel_dashboard_details[token][0].get('exchange', 'NSE').upper(), 1)
+                            elif token in excel_setup_details and excel_setup_details[token]: exchange_type_num = excel_setup_details[token][0].get('exchange_type', 1)
+                            elif token in excel_3pct_setup_details and excel_3pct_setup_details[token]: exchange_type_num = excel_3pct_setup_details[token][0].get('exchange_type', 1)
+                            else: exchange_type_num = 1
                         subscribe_list_grouped[exchange_type_num].append(token)
 
                     for ex_type, tokens in subscribe_list_grouped.items():
@@ -1666,11 +1653,13 @@ def run_background_task_scheduler():
                         smart_ws.subscribe(f"sub_{int(time.time())}", smart_ws.QUOTE, formatted_tokens)
                         subscribed_tokens.update(tokens)
                         logger.info(f"Subscribed to {len(tokens)} new tokens on exchange type {ex_type}.")
-
+                
+                # Fetch monthly highs for any new symbols
+                with data_lock:
+                    unique_tokens_3pct = list(set([(token, details[0]['exchange_type']) for token, details in excel_3pct_setup_details.items() if details]))
+                fetch_monthly_highs(smart_api_obj, unique_tokens_3pct)
                 last_scan_time = time.time()
 
-            # --- Run Setup Checks on Schedule ---
-            # FIX: Removed the is_market_hours() check to allow testing at any time.
             if current_minute % 3 == 0 and current_minute != last_checked_minute_orh:
                 check_and_update_orh_setup()
                 last_checked_minute_orh = current_minute
@@ -1678,27 +1667,26 @@ def run_background_task_scheduler():
             with data_lock:
                 has_3pct_symbols = bool(excel_3pct_setup_details)
             
-            # MODIFIED: This block now calls the single new function to check both 3% Down and High Volume setups.
             if has_3pct_symbols:
                 with data_lock:
                     unique_tokens_3pct = list(set([(token, details[0]['exchange_type']) for token, details in excel_3pct_setup_details.items() if details]))
                 
-                # Check 15-minute interval
                 if current_minute % 15 == 1 and current_minute != last_checked_minute_15min:
                     fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_3pct, 'FIFTEEN_MINUTE')
                     check_and_update_price_volume_setups()
+                    check_and_update_breakdown_status()
                     last_checked_minute_15min = current_minute
                 
-                # Check 30-minute interval
                 if current_minute % 30 == 1 and current_minute != last_checked_minute_30min:
                     fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_3pct, 'THIRTY_MINUTE')
                     check_and_update_price_volume_setups()
+                    check_and_update_breakdown_status()
                     last_checked_minute_30min = current_minute
 
-                # Check 1-hour interval
                 if current_minute == 16 and now.hour >= 10 and current_minute != last_checked_minute_1hr:
                     fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_3pct, 'ONE_HOUR')
                     check_and_update_price_volume_setups()
+                    check_and_update_breakdown_status()
                     last_checked_minute_1hr = current_minute
             
             time.sleep(1)
@@ -1711,12 +1699,11 @@ def start_main_application():
     """
     The primary function that initializes connections and runs the main processing loop.
     """
-    global smart_api_obj, smart_ws, gsheet, Dashboard, ATHCache, subscribed_tokens
+    global smart_api_obj, smart_ws, gsheet, Dashboard, ATHCache, OrdersSheet, subscribed_tokens
     global excel_dashboard_details, excel_setup_details, excel_3pct_setup_details
 
-    logger.info("🚀 Starting Combined Trading Dashboard and Signal Generator...")
+    logger.info("Starting Combined Trading Dashboard and Signal Generator...")
 
-    # --- Step 1: Connect to Google Sheets ---
     try:
         logger.info("Authenticating with Google Sheets...")
         creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_KEY_FILE_PATH, SCOPE)
@@ -1724,30 +1711,29 @@ def start_main_application():
         gsheet = client.open_by_key(GOOGLE_SHEET_ID)
         Dashboard = gsheet.worksheet(DASHBOARD_SHEET_NAME)
         ATHCache = gsheet.worksheet(ATH_CACHE_SHEET_NAME)
-        logger.info("✅ Google Sheets connected successfully.")
+        OrdersSheet = gsheet.worksheet(ORDERS_SHEET_NAME)
+        logger.info("Google Sheets connected successfully.")
     except Exception as e:
-        logger.error(f"❌ Error connecting to Google Sheets: {e}. Please check credentials and sheet names. Exiting.")
+        logger.error(f"Error connecting to Google Sheets: {e}. Please check credentials and sheet names. Exiting.")
         return
 
-    # --- Step 2: Generate SmartAPI Session ---
     try:
         logger.info("Generating SmartAPI session...")
-        # MODIFIED: Added timeout parameter to SmartConnect
-        smart_api_obj = SmartConnect(api_key=API_KEY, timeout=15) # Increased timeout to 15 seconds
+        smart_api_obj = SmartConnect(api_key=API_KEY, timeout=15)
+        smart_api_obj.root = "https://apiconnect.angelbroking.com/"
         totp = pyotp.TOTP(TOTP_SECRET).now()
         data = smart_api_obj.generateSession(CLIENT_CODE, MPIN, totp=totp)
         if data and data.get('data') and data['data'].get('jwtToken'):
             auth_token = data['data']['jwtToken']
             feed_token = data['data']['feedToken']
-            logger.info("✅ SmartAPI session generated successfully!")
+            logger.info("SmartAPI session generated successfully!")
         else:
-            logger.error(f"❌ Failed to generate SmartAPI session. Response: {data}. Exiting.")
+            logger.error(f"Failed to generate SmartAPI session. Response: {data}. Exiting.")
             return
     except Exception as e:
-        logger.error(f"❌ Error during SmartAPI session generation: {e}. Exiting.")
+        logger.error(f"Error during SmartAPI session generation: {e}. Exiting.")
         return
 
-    # --- Step 3: Initial Data Fetch and Subscriptions ---
     load_previous_day_high_cache()
     logger.info("Performing initial symbol scan...")
     new_dashboard, new_orh, new_3pct, all_tokens_for_subscription = scan_sheet_for_all_symbols(smart_api_obj, Dashboard, ATHCache)
@@ -1755,44 +1741,36 @@ def start_main_application():
     excel_setup_details = new_orh
     excel_3pct_setup_details = new_3pct
     
-    # --- Step 4: Initialize and Connect WebSocket ---
     try:
         logger.info("Initializing SmartAPI WebSocket...")
         smart_ws = MyWebSocketClient(auth_token, API_KEY, CLIENT_CODE, feed_token)
         websocket_thread = threading.Thread(target=smart_ws.connect, daemon=True)
         websocket_thread.start()
-        time.sleep(5) # Give the websocket time to connect
+        time.sleep(5)
         if not smart_ws._is_connected_flag:
-            logger.error("❌ WebSocket failed to connect. Exiting.")
+            logger.error("WebSocket failed to connect. Exiting.")
             return
-        logger.info("✅ SmartAPI WebSocket connected.")
+        logger.info("SmartAPI WebSocket connected.")
     except Exception as e:
-        logger.error(f"❌ Error initializing WebSocket: {e}. Exiting.")
+        logger.error(f"Error initializing WebSocket: {e}. Exiting.")
         return
 
-    # --- FIX: Step 4.5: Subscribe to initial tokens immediately for a faster dashboard start ---
     if all_tokens_for_subscription:
         logger.info("Subscribing to initial set of tokens for live data...")
         subscribe_list_grouped = collections.defaultdict(list)
         for token in all_tokens_for_subscription:
-            # Determine exchange type from any of the detail dicts
-            if token in excel_dashboard_details and excel_dashboard_details[token]:
-                exchange_type_num = {'NSE': 1, 'BSE': 3, 'NFO': 2}.get(excel_dashboard_details[token][0].get('exchange', 'NSE').upper(), 1)
-            elif token in excel_setup_details and excel_setup_details[token]:
-                    exchange_type_num = excel_setup_details[token][0].get('exchange_type', 1)
-            elif token in excel_3pct_setup_details and excel_3pct_setup_details[token]:
-                    exchange_type_num = excel_3pct_setup_details[token][0].get('exchange_type', 1)
-            else:
-                exchange_type_num = 1 # Default to NSE
+            if token in excel_dashboard_details and excel_dashboard_details[token]: exchange_type_num = {'NSE': 1, 'BSE': 3, 'NFO': 2}.get(excel_dashboard_details[token][0].get('exchange', 'NSE').upper(), 1)
+            elif token in excel_setup_details and excel_setup_details[token]: exchange_type_num = excel_setup_details[token][0].get('exchange_type', 1)
+            elif token in excel_3pct_setup_details and excel_3pct_setup_details[token]: exchange_type_num = excel_3pct_setup_details[token][0].get('exchange_type', 1)
+            else: exchange_type_num = 1
             subscribe_list_grouped[exchange_type_num].append(token)
 
         for ex_type, tokens in subscribe_list_grouped.items():
             formatted_tokens = [{"exchangeType": ex_type, "tokens": list(tokens)}]
             smart_ws.subscribe(f"sub_initial_{int(time.time())}", smart_ws.QUOTE, formatted_tokens)
             subscribed_tokens.update(tokens)
-            logger.info(f"✅ Subscribed to {len(tokens)} initial tokens on exchange type {ex_type}.")
+            logger.info(f"Subscribed to {len(tokens)} initial tokens on exchange type {ex_type}.")
 
-    # --- Step 5: Start Concurrent Threads ---
     logger.info("Starting concurrent application threads...")
     
     dashboard_updater_thread = threading.Thread(target=run_live_dashboard_updater, daemon=True)
@@ -1801,17 +1779,14 @@ def start_main_application():
     quote_updater_thread = threading.Thread(target=run_quote_updater, daemon=True)
     quote_updater_thread.start()
 
-    # FIX: Start the slow, initial data fetch in its own background thread
     initial_data_fetch_thread = threading.Thread(target=run_initial_setup_data_fetch, daemon=True)
     initial_data_fetch_thread.start()
 
-    # This scheduler now only handles recurring tasks
     background_scheduler_thread = threading.Thread(target=run_background_task_scheduler, daemon=True)
     background_scheduler_thread.start()
     
-    logger.info("🚀 All systems are go! The application is now running.")
+    logger.info("All systems are go! The application is now running.")
     
-    # --- Step 6: Keep the Main Thread Alive ---
     try:
         while True:
             time.sleep(60)
