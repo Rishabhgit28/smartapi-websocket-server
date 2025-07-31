@@ -1,2 +1,2 @@
 #!/bin/bash
-python Combined Code.py
+python Combined_Code.py
