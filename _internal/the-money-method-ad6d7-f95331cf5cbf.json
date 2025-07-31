@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "the-money-method-ad6d7",
+  "private_key_id": "f95331cf5cbfe5650c28eba205de3171d37f2976",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEuwIBADANBgkqhkiG9w0BAQEFAASCBKUwggShAgEAAoIBAQDGmRHcvPVJL6qz\ninHck0rOksg23atgKXhTaX8iOV+YHnFJltdZ79P1OPGkm/lbpBTg1r8TTZD5kycL\nH6tq5eoho2Urv3+8ZPW8+NULn/NzKsVnUME9pAH/PEpeA3NNtu88U7HpznSGWGEK\n5hQA0Dhs66nqwW5fnA5DLfvAgP+4bupUPXVeDJWjGswuj1r0fhVrChuQQpci6QrK\n6DJM5LAmUj8nJz3NR/GKuReUpCw4Hwbd+aU54u7k3s48ZHbZi69GbIzcvLA54eFb\nUtJtQImLNtef8w/lnRyTDn8D87e5zLzdmo9JRHVccTD3/PfPjQaSe+mtI2GEdIgX\nugZv9QXRAgMBAAECgf86Lp4NDU7PIifgca7p8Dz6SAZgDJEomv2lckLMxAI9jq2h\n4Y81yg1OymAA2bE0J932APP5s7/FXlcR6zVNHA57zGLXbkL97pYPxtajkTjBhMZQ\nflgetu3e2MrwwBIHspBkHCEDXnjE4x+LEdzKYDYnsuMU45ZybEXBaLdYrnI8lb21\n0EFNIAoW+mkUIkIM+tCwv90bNdWKMgk3H/ke9Q4dCq3GtNuHmq4xV0s8+gCMePrQ\nxQMoWedBb/Ifnw8MuoUMA7x+SFSV0d8xvF8nYOUIUdq6X26RqLfyGmi+XXSsCC3I\nUpornO596uTJhIYp3r2F8cyFXQ8YQ04mWnLliw0CgYEA73SiTyQxw2mxx1vdGeeP\ngFu57CEx9cut+cHoGBl9oZ7yKm+dQQjAQYihjaO2KlVONYTNmHzlBZ/JIw4uqI65\nHImyJQ+sunFz8ZMiyT0zuufkBLApeBi/mdutcDWx3RGRGyuvsiEPZzLPBiikWnHp\n2/GpMDE6mbOOVKzvYZ4jjY8CgYEA1FHEOlBzQiF09vnMaWF0KPV+FJ6ZXe1Q/pD8\nC7VYzW8mw2shbJn+b9kPDRWNnRs408dBHg2ryHqJCNbw6rjGY7d9tJL4qyQToToq\nsNFUUlrpZYwGfLE/hBC8AazlA32bts7s9sfmM1nvW5q988mExkyQxYxr68xjIPET\nsZ6lRp8CgYEAmdKfAaAKp7GaFqsYma97K8XA5cNdSLyTAkJiSjj1z4E/p6sTpddt\nSavvvAFS4Fb0asTpHe/9X2OJ3g8aQgWNPJvn6I7tMsf251TRn9zFAmg8vhY8TX34\nd2n7PH4ByDWktYOW1iMOtgiZnSc2jTNoO3Y+bUryjhIeeJ6vGFJyHFkCgYBdLGTI\nknWCF9yUZZrmw/WN4+2obtEu/u4ESOvS14pY3OZN672HQyz9OGv6efLjdwbBKTfS\nUH2KRPvN/UVMPDoTmHp5u+WUdQiIQFZrsfEnEu5JueE+5ynQcueOdKkrlvu2hahH\nxAGpl1YLBSVGzrCNtRvzFWRm3hLCagkScWRmUQKBgEZgng/1aUXsn5Bw1r/O6EYi\nGBbBUcggnw7evk2yR53fdWOcJSZEkyHwDKDN2xYe4hdlt7cGg4Pc2DLU5cCmfau2\nn61m1jmLuVTNUPlthSDnuxuEqE3IcbO8Li3AWzWmkRoFD+ldt6tEh7hiRXufIx8E\nYegvIrCyX42I8r9TQFyK\n-----END PRIVATE KEY-----\n",
+  "client_email": "sheets-access@the-money-method-ad6d7.iam.gserviceaccount.com",
+  "client_id": "116875552364052242500",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/sheets-access%40the-money-method-ad6d7.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

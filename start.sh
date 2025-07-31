@@ -1,2 +1,2 @@
 #!/bin/bash
-python smartWebSocketV2.py
+python Combined Code.py

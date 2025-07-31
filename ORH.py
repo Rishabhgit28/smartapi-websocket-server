@@ -1,5 +1,5 @@
 import logging
-import xlwings as xw
+# import xlwings as xw # Removed xlwings
 import pyotp
 import time
 import json
@@ -16,6 +16,10 @@ import winsound  # 🟢 For playing sound on ORH detection (Windows only)
 
 import logzero # Ensure logzero is imported at the top
 from logzero import logger # Import logger from logzero
+
+# --- Google Sheets Imports ---
+from oauth2client.service_account import ServiceAccountCredentials
+import gspread
 
 # --- Configure Logging ---
 # Configure logzero for daily log files globally
@@ -40,7 +44,7 @@ if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
 from SmartApi import SmartConnect
 from SmartApi.smartExceptions import DataException
 
-# --- Global Variables for WebSocket Data & Excel Interaction ---
+# --- Global Variables for WebSocket Data & Google Sheets Interaction ---
 latest_tick_data = collections.defaultdict(dict)
 interval_ohlc_data = collections.defaultdict(lambda: collections.defaultdict(dict))
 completed_3min_candles = collections.defaultdict(list) # Stores recent 3-min candles for ORH logic
@@ -57,27 +61,50 @@ volume_history_3pct = collections.defaultdict(lambda: collections.defaultdict(li
 
 
 # --- Configuration Constants ---
-EXCEL_FILE_PATH = 'MarketDashboard.xlsm'
+# EXCEL_FILE_PATH = 'MarketDashboard.xlsm' # Removed for Google Sheets
 EXCEL_UPDATE_INTERVAL_SECONDS = 180
 ORH_CHECK_INTERVAL_SECONDS = 180
-START_ROW = 5 # Starting row for scanning symbols in Excel
+START_ROW = 5 # Starting row for scanning symbols in Google Sheet
 EXCEL_RETRY_ATTEMPTS = 3
-EXCEL_RETRY_DELAY = 2 # Initial delay for Excel operations, not API calls
+EXCEL_RETRY_DELAY = 2 # Initial delay for Google Sheets operations, not API calls
 PREV_DAY_HIGH_CACHE_FILE = 'previous_day_high_cache.json' # File to store cached previous day's high
 
-# Dashboard Sheet Column Mappings (ORH Setup)
-DASHBOARD_SHEET_NAME = 'Dashboard'
-CREDENTIAL_SHEET_NAME = 'Credential'
-EXCHANGE_COL = 'B' # For ORH symbols
-SYMBOL_COL = 'C'   # For ORH symbols
-TOKEN_COL = 'F'    # Column in Credential sheet for ORH tokens
-ORH_RESULT_COL = 'G' # Column to write ORH results in Dashboard sheet
+# --- Google Sheets Specific Configuration ---
+# IMPORTANT: Replace with your actual Google Sheet ID
+GOOGLE_SHEET_ID = '1cYBpsVKCbrYCZzrj8NAMEgUG4cXy5Q5r9BtQE1Cjmz0' 
+JSON_KEY_FILE_PATH = "" # Will be set dynamically
+# Path to your service account JSON key file
+# For deployment, check /etc/secrets/creds.json
+if os.path.exists("/etc/secrets/creds.json"):
+    JSON_KEY_FILE_PATH = "/etc/secrets/creds.json"
+else:
+    # Fallback for local development/testing
+    JSON_KEY_FILE_PATH = os.path.join(os.path.dirname(__file__), "the-money-method-ad6d7-f95331cf5cbf.json")
 
-# New Dashboard Sheet Column Mappings (3% Down Candle Setup)
-EXCHANGE_COL_3PCT = 'M' # Exchange for 3% down symbols
-SYMBOL_COL_3PCT = 'N'   # Symbols for 3% down setup
-TOKEN_COL_3PCT = 'G'    # Column in Credential sheet for 3% down tokens (reusing G)
-PCT_DOWN_RESULT_COL = 'AC' # Column to write 3% down results in Dashboard sheet
+SCOPE = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+
+
+# Sheet & Column Mappings
+DASHBOARD_SHEET_NAME = 'Dashboard'
+ATH_CACHE_SHEET_NAME = 'ATH Cache'
+
+# ORH Setup Mappings
+EXCHANGE_COL = 'B'      # In Dashboard sheet
+SYMBOL_COL = 'C'        # In Dashboard sheet
+TOKEN_COL = 'Y'         # ✅ CHANGED: In ATH Cache sheet
+ORH_RESULT_COL = 'G'    # In Dashboard sheet
+ORH_BUY_STOP_COL = 'H'  # In Dashboard sheet
+
+# 3% Down Candle Setup Mappings
+EXCHANGE_COL_3PCT = 'M' # In Dashboard sheet
+SYMBOL_COL_3PCT = 'N'   # In Dashboard sheet
+TOKEN_COL_3PCT = 'Z'    # In ATH Cache sheet
+PCT_DOWN_RESULT_COL = 'AC' # In Dashboard sheet
+PCT_DOWN_CONFIRM_COL = 'AD'# In Dashboard sheet
 
 # Candle Intervals for 3% Down Setup
 CANDLE_INTERVALS_3PCT_API = ['FIFTEEN_MINUTE', 'THIRTY_MINUTE', 'ONE_HOUR']
@@ -89,10 +116,11 @@ CANDLE_INTERVAL_MAP_DISPLAY = {
 # Define a flag for testing historical data for 3% down setup
 TEST_3PCT_DOWN_HISTORICAL_FETCH = False # Set to False for live market operation after testing
 
-# --- Xlwings App and Workbook Objects (Initialized later) ---
-wb = None
+# --- Google Sheets Client and Worksheet Objects (Initialized later) ---
+client = None
+gsheet = None
 Dashboard = None
-Credential = None
+ATHCache = None # ✅ NEW: Worksheet object for ATH Cache
 smart_api_obj = None # Global SmartConnect object
 
 # --- Helper Functions ---
@@ -167,6 +195,32 @@ def is_market_hours():
         if market_open_time <= current_time <= market_close_time:
             return True
     return False
+
+def col_letter_to_index(letter):
+    """Converts an Excel column letter (e.g., 'A', 'B', 'AA') to a 1-based index."""
+    index = 0
+    for i, char in enumerate(reversed(letter.upper())):
+        index += (ord(char) - ord('A') + 1) * (26 ** i)
+    return index
+
+def get_last_row_in_column(sheet, column_letter):
+    """Finds the last row with data in a given column for a gspread worksheet."""
+    try:
+        column_index = col_letter_to_index(column_letter)
+        # Get all values in the column
+        column_values = sheet.col_values(column_index)
+        # Find the index of the last non-empty string (or non-whitespace string)
+        last_non_empty_index = -1
+        for i, val in enumerate(column_values):
+            if val and str(val).strip() != '':
+                last_non_empty_index = i
+        
+        # gspread returns 0-indexed list, so add 1 for row number
+        # If no non-empty values, return START_ROW - 1 to indicate empty or only headers
+        return last_non_empty_index + 1 if last_non_empty_index != -1 else START_ROW - 1
+    except Exception as e:
+        logger.error(f"Error in get_last_row_in_column for sheet '{sheet.title}', column '{column_letter}': {e}")
+        return START_ROW - 1
 
 # --- SmartWebSocketV2 Class (Copied from smartWebSocketV2.py) ---
 # This class handles the low-level WebSocket communication.
@@ -428,7 +482,7 @@ class SmartWebSocketV2(object):
             candle_info['low'] = min(candle_info.get('low', ltp_scaled), ltp_scaled)
             candle_info['last_ltp'] = ltp_scaled
 
-# --- Data Fetch and Excel Functions ---
+# --- Data Fetch and Google Sheets Functions ---
 def fetch_initial_candle_data(smart_api_obj, symbols_to_fetch):
     """
     Fetches historical candle data for today to pre-populate candles for ORH.
@@ -616,51 +670,53 @@ def fetch_previous_day_candle_data(smart_api_obj, symbols_to_fetch):
     print("="*80 + "\n")
 
 
-def get_last_row_in_column(sheet, column):
-    """Finds the last row with data in a given column."""
-    try:
-        last_row = sheet.range(f'{column}{sheet.api.Rows.Count}').end('up').row
-        return last_row
-    except Exception as e:
-        logger.error(f"Error in get_last_row_in_column for sheet '{sheet.name}', column '{column}': {e}")
-        return START_ROW - 1
-
 def scan_excel_for_symbols_and_tokens():
     """
-    Scans Excel for symbols and tokens for both ORH and 3% Down setups.
+    Scans Google Sheet for symbols and tokens for both ORH and 3% Down setups.
     Populates excel_symbol_details (ORH) and excel_3pct_symbol_details.
     Returns a combined list of unique tokens to subscribe to.
     """
-    global excel_symbol_details, excel_3pct_symbol_details
+    global excel_symbol_details, excel_3pct_symbol_details, Dashboard, ATHCache
     excel_symbol_details.clear()
     excel_3pct_symbol_details.clear()
     
     all_tokens_to_subscribe = set()
     tokens_to_subscribe_list = [] # List of dicts for SmartWebSocketV2.subscribe
 
-    logger.info("Scanning Excel for symbols and tokens...")
+    logger.info("Scanning Google Sheet for symbols and tokens...")
 
     try:
-        last_row_dashboard = get_last_row_in_column(Dashboard, SYMBOL_COL)
+        last_row_dashboard_orh = get_last_row_in_column(Dashboard, SYMBOL_COL)
         last_row_dashboard_3pct = get_last_row_in_column(Dashboard, SYMBOL_COL_3PCT)
-        last_row_credential_orh = get_last_row_in_column(Credential, TOKEN_COL)
-        last_row_credential_3pct = get_last_row_in_column(Credential, TOKEN_COL_3PCT) # This is G, same as F, so max of these
+        last_row_ath_cache_orh = get_last_row_in_column(ATHCache, TOKEN_COL)
+        last_row_ath_cache_3pct = get_last_row_in_column(ATHCache, TOKEN_COL_3PCT)
         
-        max_row_to_scan = max(last_row_dashboard, last_row_dashboard_3pct, last_row_credential_orh, last_row_credential_3pct)
+        max_row_to_scan = max(last_row_dashboard_orh, last_row_dashboard_3pct, last_row_ath_cache_orh, last_row_ath_cache_3pct)
     except Exception as e:
-        logger.error(f"Error determining last row in Excel sheets: {e}")
+        logger.error(f"Error determining last row in Google Sheets: {e}")
         max_row_to_scan = START_ROW -1
 
     if max_row_to_scan < START_ROW:
-        logger.warning(f"No symbols found in Excel from row {START_ROW} onwards.")
+        logger.warning(f"No symbols found in Google Sheet from row {START_ROW} onwards.")
         return []
 
-    for row in range(START_ROW, max_row_to_scan + 1):
-        # --- Scan for ORH symbols (Cols B, C, F) ---
+    # Pre-fetch all values from relevant columns for efficiency
+    dashboard_col_b_values = Dashboard.col_values(col_letter_to_index(EXCHANGE_COL))
+    dashboard_col_c_values = Dashboard.col_values(col_letter_to_index(SYMBOL_COL))
+    dashboard_col_m_values = Dashboard.col_values(col_letter_to_index(EXCHANGE_COL_3PCT))
+    dashboard_col_n_values = Dashboard.col_values(col_letter_to_index(SYMBOL_COL_3PCT))
+    
+    ath_cache_col_y_values = ATHCache.col_values(col_letter_to_index(TOKEN_COL)) # ✅ For ORH
+    ath_cache_col_z_values = ATHCache.col_values(col_letter_to_index(TOKEN_COL_3PCT)) # ✅ For 3% Down
+
+    for row_idx in range(START_ROW - 1, max_row_to_scan): # 0-indexed for lists
+        row = row_idx + 1 # 1-indexed for Excel/Sheets row number
+
+        # --- Scan for ORH symbols (Dashboard: B, C; ATH Cache: Y) ---
         try:
-            orh_exchange_type_raw = Dashboard.range(f'{EXCHANGE_COL}{row}').value
-            orh_symbol_raw = Dashboard.range(f'{SYMBOL_COL}{row}').value
-            orh_token_raw = Credential.range(f'{TOKEN_COL}{row}').value
+            orh_exchange_type_raw = dashboard_col_b_values[row_idx] if row_idx < len(dashboard_col_b_values) else None
+            orh_symbol_raw = dashboard_col_c_values[row_idx] if row_idx < len(dashboard_col_c_values) else None
+            orh_token_raw = ath_cache_col_y_values[row_idx] if row_idx < len(ath_cache_col_y_values) else None # ✅ CHANGED
 
             orh_exchange_type_str = str(orh_exchange_type_raw).strip() if orh_exchange_type_raw is not None else None
             orh_symbol = str(orh_symbol_raw).strip() if orh_symbol_raw is not None else None
@@ -676,14 +732,14 @@ def scan_excel_for_symbols_and_tokens():
                     excel_symbol_details[orh_token].append({'symbol': orh_symbol, 'row': row, 'orh_col': ORH_RESULT_COL, 'exchange_type': orh_exchange_type_int})
                     all_tokens_to_subscribe.add((orh_token, orh_exchange_type_int))
 
-        except Exception as e:
-            logger.debug(f"Error reading ORH Excel row {row}: {e}") # Use debug as many rows might be empty
+        except (ValueError, TypeError, IndexError) as e:
+            logger.debug(f"Error reading ORH Google Sheet row {row}: {e}") # Use debug as many rows might be empty
 
-        # --- Scan for 3% Down symbols (Cols M, N, G) ---
+        # --- Scan for 3% Down symbols (Dashboard: M, N; ATH Cache: Z) ---
         try:
-            pct_exchange_type_raw = Dashboard.range(f'{EXCHANGE_COL_3PCT}{row}').value
-            pct_symbol_raw = Dashboard.range(f'{SYMBOL_COL_3PCT}{row}').value
-            pct_token_raw = Credential.range(f'{TOKEN_COL_3PCT}{row}').value # Column G for 3% tokens
+            pct_exchange_type_raw = dashboard_col_m_values[row_idx] if row_idx < len(dashboard_col_m_values) else None
+            pct_symbol_raw = dashboard_col_n_values[row_idx] if row_idx < len(dashboard_col_n_values) else None
+            pct_token_raw = ath_cache_col_z_values[row_idx] if row_idx < len(ath_cache_col_z_values) else None
 
             pct_exchange_type_str = str(pct_exchange_type_raw).strip() if pct_exchange_type_raw is not None else None
             pct_symbol = str(pct_symbol_raw).strip() if pct_symbol_raw is not None else None
@@ -699,8 +755,8 @@ def scan_excel_for_symbols_and_tokens():
                     excel_3pct_symbol_details[pct_token].append({'symbol': pct_symbol, 'row': row, 'pct_down_col': PCT_DOWN_RESULT_COL, 'exchange_type': pct_exchange_type_int})
                     all_tokens_to_subscribe.add((pct_token, pct_exchange_type_int))
 
-        except Exception as e:
-            logger.debug(f"Error reading 3% down Excel row {row}: {e}") # Use debug as many rows might be empty
+        except (ValueError, TypeError, IndexError) as e:
+            logger.debug(f"Error reading 3% down Google Sheet row {row}: {e}") # Use debug as many rows might be empty
 
     # Convert set of (token, exchange_type) to list of dicts for subscription
     for token, exchange_type in all_tokens_to_subscribe:
@@ -809,11 +865,15 @@ def fetch_historical_candles_for_3pct_down(smart_api_obj, tokens_to_fetch, inter
 
 
 def check_and_update_orh_setup():
-    """Checks the latest completed 3-min candle for ORH setup and updates Excel accordingly."""
+    """Checks the latest completed 3-min candle for ORH setup and updates Google Sheet accordingly."""
     import winsound
     logger.info("🔍 Checking latest 3-min candle for ORH setup...")
 
-    excel_updates_queued = []
+    google_sheet_updates_queued = []
+
+    # Pre-fetch current values for ORH_RESULT_COL and ORH_BUY_STOP_COL
+    orh_result_col_values = Dashboard.col_values(col_letter_to_index(ORH_RESULT_COL))
+    orh_buy_stop_col_values = Dashboard.col_values(col_letter_to_index(ORH_BUY_STOP_COL))
 
     for token, symbol_entries in excel_symbol_details.items():
         candles = completed_3min_candles.get(token, [])
@@ -859,32 +919,34 @@ def check_and_update_orh_setup():
                     except Exception as e:
                         logger.warning(f"🔇 Sound alert failed: {e}")
 
-        new_value = f"Yes({trigger_time_str})" if orh_result == "Yes" else "No"
+        new_value_orh_col = f"Yes({trigger_time_str})" if orh_result == "Yes" else "No"
+        new_value_buy_stop_col = buy_stop_value if buy_stop_value else ""
 
         for entry in symbol_entries:
             row = entry["row"]
-            orh_col = entry["orh_col"]
-            time_col = "G" # This seems to be the ORH result column based on previous code
-            buy_stop_col = "H"
-
-            # Update ORH result column
-            current_value = Dashboard.range(f'{orh_col}{row}').value
-            if str(current_value) != new_value:
-                excel_updates_queued.append({
+            row_idx = row - 1 # 0-indexed for list access
+            
+            # ORH Result Column (G)
+            current_value_orh = orh_result_col_values[row_idx] if row_idx < len(orh_result_col_values) else ""
+            if str(current_value_orh).strip() != new_value_orh_col.strip():
+                google_sheet_updates_queued.append({
                     "row": row,
-                    "column": orh_col,
-                    "value": new_value
+                    "column": ORH_RESULT_COL,
+                    "value": new_value_orh_col
+                })
+            
+            # Buy Stop Column (H)
+            current_value_buy_stop = orh_buy_stop_col_values[row_idx] if row_idx < len(orh_buy_stop_col_values) else ""
+            if str(current_value_buy_stop).strip() != str(new_value_buy_stop_col).strip():
+                google_sheet_updates_queued.append({
+                    "row": row,
+                    "column": ORH_BUY_STOP_COL,
+                    "value": new_value_buy_stop_col
                 })
 
-            # Column G: Yes(HH:MM) if ORH triggered, else blank
-            Dashboard.range(f'{time_col}{row}').value = new_value if orh_result == "Yes" else ""
-
-            # Column H: Buy Stop price if ORH triggered
-            Dashboard.range(f'{buy_stop_col}{row}').value = buy_stop_value if buy_stop_value else ""
-
-    if excel_updates_queued:
-        update_excel_cells_batch(excel_updates_queued)
-        logger.info(f"✅ Applied {len(excel_updates_queued)} ORH updates to Dashboard.")
+    if google_sheet_updates_queued:
+        update_google_sheet_cells_batch(Dashboard, google_sheet_updates_queued)
+        logger.info(f"✅ Applied {len(google_sheet_updates_queued)} ORH updates to Dashboard.")
     else:
         logger.info("ℹ️ No ORH setup updates needed.")
 
@@ -892,13 +954,17 @@ def check_and_update_orh_setup():
 def check_and_update_3pct_down_setup():
     """
     Checks the latest completed 15-min, 30-min, and 1-hour candles for a 3% down condition
-    and updates Excel accordingly.
+    and updates Google Sheet accordingly.
     - Column AC: Lists triggered intervals for 3% Down.
     - Column AD: Lists 'high volume (...) for Xmin' for candles with highest volume.
     """
     logger.info("🔍 Checking for 3% Down Candle setup...")
-    excel_updates_queued_pct = []
-    excel_updates_queued_volume = []
+    google_sheet_updates_queued_pct = []
+    google_sheet_updates_queued_volume = []
+
+    # Pre-fetch current values for PCT_DOWN_RESULT_COL and PCT_DOWN_CONFIRM_COL
+    pct_down_result_col_values = Dashboard.col_values(col_letter_to_index(PCT_DOWN_RESULT_COL))
+    pct_down_confirm_col_values = Dashboard.col_values(col_letter_to_index(PCT_DOWN_CONFIRM_COL))
 
     for token, symbol_entries in excel_3pct_symbol_details.items():
         symbol_name = symbol_entries[0]['symbol']
@@ -962,13 +1028,14 @@ def check_and_update_3pct_down_setup():
         # ✅ Update Column AC (3% Down Trigger)
         for entry in symbol_entries:
             row = entry["row"]
+            row_idx = row - 1
             pct_down_col = entry["pct_down_col"]
 
-            existing_value = Dashboard.range(f'{pct_down_col}{row}').value or ""
+            existing_value = pct_down_result_col_values[row_idx] if row_idx < len(pct_down_result_col_values) else ""
             new_value = ", ".join(triggered_intervals_pct) if triggered_intervals_pct else existing_value
 
             if str(existing_value).strip() != new_value.strip():
-                excel_updates_queued_pct.append({
+                google_sheet_updates_queued_pct.append({
                     "row": row,
                     "column": pct_down_col,
                     "value": new_value,
@@ -977,35 +1044,73 @@ def check_and_update_3pct_down_setup():
         # ✅ Update Column AD (High Volume Phase 1)
         for entry in symbol_entries:
             row = entry["row"]
-            col_ad = f'AD{row}'
-            existing_ad = Dashboard.range(col_ad).value or ""
+            row_idx = row - 1
+            col_ad = PCT_DOWN_CONFIRM_COL # 'AD'
+            
+            existing_ad = pct_down_confirm_col_values[row_idx] if row_idx < len(pct_down_confirm_col_values) else ""
 
             if triggered_intervals_volume:
                 combined_new = ", ".join(triggered_intervals_volume)
                 # If already confirmed with "Yes for ...", preserve those parts
                 parts_to_keep = [part for part in existing_ad.split(", ") if part.startswith("Yes for")]
                 full_updated_value = ", ".join(parts_to_keep + triggered_intervals_volume)
+                
+                # Add to batch update queue
+                google_sheet_updates_queued_volume.append({
+                    "row": row,
+                    "column": col_ad,
+                    "value": full_updated_value
+                })
+            else:
+                # If no new high volume triggers, but there are existing "Yes for" confirmations, preserve them.
+                parts_to_keep = [part for part in existing_ad.split(", ") if part.startswith("Yes for")]
+                if parts_to_keep and str(existing_ad).strip() != ", ".join(parts_to_keep).strip():
+                     google_sheet_updates_queued_volume.append({
+                        "row": row,
+                        "column": col_ad,
+                        "value": ", ".join(parts_to_keep)
+                    })
 
-                Dashboard.range(col_ad).value = full_updated_value
 
     # ✅ Batch apply updates to Column AC
-    if excel_updates_queued_pct:
-        update_excel_cells_batch(excel_updates_queued_pct)
-        logger.info(f"✅ Applied {len(excel_updates_queued_pct)} 3% Down updates to Column AC.")
+    if google_sheet_updates_queued_pct:
+        update_google_sheet_cells_batch(Dashboard, google_sheet_updates_queued_pct)
+        logger.info(f"✅ Applied {len(google_sheet_updates_queued_pct)} 3% Down updates to Column AC.")
     else:
-        logger.info("ℹ️ No 3% Down % updates needed.")
+        logger.info("ℹ️ No 3% Down % updates needed for Column AC.")
+
+    # ✅ Batch apply updates to Column AD
+    if google_sheet_updates_queued_volume:
+        update_google_sheet_cells_batch(Dashboard, google_sheet_updates_queued_volume)
+        logger.info(f"✅ Applied {len(google_sheet_updates_queued_volume)} 3% Down volume updates to Column AD.")
+    else:
+        logger.info("ℹ️ No 3% Down volume updates needed for Column AD.")
 
 
 def confirm_high_volume_3pct_down(smart_api_obj):
     logger.info("🔄 Checking 15-min confirmation for high volume 3% down setups...")
+    google_sheet_updates_queued_confirm = []
+
+    # Pre-fetch current values for PCT_DOWN_CONFIRM_COL
+    pct_down_confirm_col_values = Dashboard.col_values(col_letter_to_index(PCT_DOWN_CONFIRM_COL))
 
     for token, interval_dict in latest_completed_candles_3pct.items():
         if 'confirmed_intervals' not in interval_dict:
             continue
 
         confirmed_intervals = interval_dict['confirmed_intervals']
-        confirmed_texts = []
+        confirmed_texts_for_this_token = [] # To accumulate all "Yes for Xmin" for this token
 
+        # Get existing AD column value to merge with new confirmations
+        current_ad_value = ""
+        if token in excel_3pct_symbol_details:
+            row = excel_3pct_symbol_details[token][0]['row']
+            row_idx = row - 1
+            current_ad_value = pct_down_confirm_col_values[row_idx] if row_idx < len(pct_down_confirm_col_values) else ""
+        
+        # Preserve existing "high volume" parts if they exist
+        existing_high_volume_parts = [part for part in current_ad_value.split(", ") if part.startswith("high volume")]
+        
         for interval_api, details in confirmed_intervals.items():
             candle_low = details['low']
             candle_time = details['time']
@@ -1030,44 +1135,67 @@ def confirm_high_volume_3pct_down(smart_api_obj):
 
                 response = smart_api_obj.getCandleData(historic_param)
                 if response.get("status") and response.get("data"):
-                    close_price = response["data"][-1][4] # Close of next 15m candle
-                    if close_price < candle_low:
-                        confirmed_texts.append(f"Yes for {CANDLE_INTERVAL_MAP_DISPLAY.get(interval_api)}")
-                        logger.info(f"✅ Confirmation: {symbol} → Yes for {CANDLE_INTERVAL_MAP_DISPLAY.get(interval_api)}")
+                    if response["data"]: # Ensure data is not empty
+                        close_price = response["data"][-1][4] # Close of next 15m candle
+                        if close_price < candle_low:
+                            confirmed_texts_for_this_token.append(f"Yes for {CANDLE_INTERVAL_MAP_DISPLAY.get(interval_api)}")
+                            logger.info(f"✅ Confirmation: {symbol} → Yes for {CANDLE_INTERVAL_MAP_DISPLAY.get(interval_api)}")
+                        else:
+                             logger.info(f"ℹ️ No confirmation for {symbol} ({CANDLE_INTERVAL_MAP_DISPLAY.get(interval_api)}): Close ({close_price}) not below low ({candle_low}).")
+                    else:
+                        logger.warning(f"No next 15-min candle data for confirmation for {symbol}.")
 
             except Exception as e:
-                logger.warning(f"Confirmation check failed for {token}: {e}")
+                logger.warning(f"Confirmation check failed for {token} ({symbol}): {e}")
                 continue
+        
+        # Combine existing high volume parts with new confirmations
+        final_ad_value_parts = existing_high_volume_parts + confirmed_texts_for_this_token
+        final_ad_value = ", ".join(sorted(list(set(final_ad_value_parts)))) # Use set to deduplicate, then sort for consistency
 
         # Write confirmed result to Column AD
-        if confirmed_texts:
+        if token in excel_3pct_symbol_details:
             for entry in excel_3pct_symbol_details[token]:
                 row = entry["row"]
-                Dashboard.range(f'AD{row}').value = ", ".join(confirmed_texts)
+                row_idx = row - 1
+                current_value_ad = pct_down_confirm_col_values[row_idx] if row_idx < len(pct_down_confirm_col_values) else ""
+                if str(current_value_ad).strip() != final_ad_value.strip():
+                    google_sheet_updates_queued_confirm.append({
+                        "row": row,
+                        "column": PCT_DOWN_CONFIRM_COL,
+                        "value": final_ad_value
+                    })
+    
+    if google_sheet_updates_queued_confirm:
+        update_google_sheet_cells_batch(Dashboard, google_sheet_updates_queued_confirm)
+        logger.info(f"✅ Applied {len(google_sheet_updates_queued_confirm)} 3% Down confirmation updates to Column AD.")
+    else:
+        logger.info("ℹ️ No 3% Down confirmation updates needed.")
 
 
-def update_excel_cells_batch(updates):
-    """Helper function to batch update multiple Excel cells."""
-    global wb
+def update_google_sheet_cells_batch(sheet, updates):
+    """Helper function to batch update multiple Google Sheet cells."""
     if not updates:
         return
     try:
-        if wb: # Ensure workbook is open
-            wb.app.screen_updating = False
-            for update in updates:
-                cell = Dashboard.range(f'{update["column"]}{update["row"]}')
-                cell.value = update["value"]
-        else:
-            logger.warning("Workbook not open, skipping Excel batch update.")
+        cell_list = []
+        for update in updates:
+            row = update["row"]
+            col_letter = update["column"]
+            col_index = col_letter_to_index(col_letter)
+            value = update["value"]
+            cell_list.append(gspread.Cell(row, col_index, value))
+        
+        if cell_list:
+            sheet.update_cells(cell_list)
+            logger.info(f"Successfully applied {len(cell_list)} batch updates to Google Sheet '{sheet.title}'.")
     except Exception as e:
-        logger.exception(f"An unexpected error during batch Excel update: {e}")
-    finally:
-        if wb:
-            wb.app.screen_updating = True
+        logger.exception(f"An unexpected error during batch Google Sheet update for sheet '{sheet.title}': {e}")
+
 
 # --- Main Script Execution ---
 def main():
-    global wb, Dashboard, Credential, subscribed_tokens, smart_ws, smart_api_obj
+    global client, gsheet, Dashboard, ATHCache, subscribed_tokens, smart_ws, smart_api_obj
 
     logger.info("Starting ORH and 3% Down Standalone Script...")
     print("[INFO] Starting ORH and 3% Down Standalone Script...")
@@ -1081,6 +1209,19 @@ def main():
 
     if not all([API_KEY, CLIENT_CODE, MPIN, TOTP_SECRET]):
         logger.error("SmartAPI credentials not provided. Please update the script.")
+        return
+    
+    # --- Google Sheets Authentication ---
+    try:
+        logger.info("Authenticating with Google Sheets...")
+        creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_KEY_FILE_PATH, SCOPE)
+        client = gspread.authorize(creds)
+        gsheet = client.open_by_key(GOOGLE_SHEET_ID)
+        Dashboard = gsheet.worksheet(DASHBOARD_SHEET_NAME)
+        ATHCache = gsheet.worksheet(ATH_CACHE_SHEET_NAME)
+        logger.info("Google Sheets connected successfully.")
+    except Exception as e:
+        logger.error(f"Error connecting to Google Sheets: {e}. Ensure the JSON key file is correct, and sheet names ('{DASHBOARD_SHEET_NAME}', '{ATH_CACHE_SHEET_NAME}') are valid.")
         return
 
     load_previous_day_high_cache()
@@ -1104,13 +1245,7 @@ def main():
         return
 
     try:
-        logger.info(f"Connecting to open Excel workbook '{EXCEL_FILE_PATH}'...")
-        wb = xw.Book(os.path.basename(EXCEL_FILE_PATH))
-        Dashboard = wb.sheets[DASHBOARD_SHEET_NAME]
-        Credential = wb.sheets[CREDENTIAL_SHEET_NAME]
-        logger.info("Excel workbook connected successfully.")
-
-        # Scan Excel for all symbols (ORH and 3% Down)
+        # Scan Google Sheet for all symbols (ORH and 3% Down)
         all_tokens_for_subscription = scan_excel_for_symbols_and_tokens()
         
         # Initial data fetches are now conditional on market hours
@@ -1149,7 +1284,7 @@ def main():
 
 
     except Exception as e:
-        logger.error(f"Error during initial setup: {e}. Please ensure '{EXCEL_FILE_PATH}' is OPEN.")
+        logger.error(f"Error during initial setup: {e}. Please ensure Google Sheet is accessible.")
         return
 
     try:
@@ -1181,7 +1316,7 @@ def main():
             current_minute = now.minute
             current_time = now.time()
 
-            # Re-scan Excel periodically to pick up new symbols/tokens
+            # Re-scan Google Sheet periodically to pick up new symbols/tokens
             tokens_to_subscribe_list = scan_excel_for_symbols_and_tokens()
             
             # Filter for new tokens to subscribe
