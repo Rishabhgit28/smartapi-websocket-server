@@ -5,5 +5,7 @@ requests
 gspread
 oauth2client
 pycryptodome
-git+https://github.com/angel-one/smartapi-python.git
 flask
+yfinance
+python-dateutil
+git+https://github.com/angel-one/smartapi-python.git
