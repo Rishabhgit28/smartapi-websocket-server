@@ -27,7 +27,7 @@ from flask import Flask
 import gspread
 import pyotp
 import websocket
-import requests 
+import requests
 import yfinance as yf # <-- ADDED FOR YAHOO FINANCE
 import logzero
 from logzero import logger
@@ -102,10 +102,10 @@ TOTP_SECRET = "QHO5IWOISV56Z2BFTPFSRSQVRQ"
 GOOGLE_SHEET_ID = '1cYBpsVKCbrYCZzrj8NAMEgUG4cXy5Q5r9BtQE1Cjmz0'
 DASHBOARD_SHEET_NAME = 'Dashboard'
 ATH_CACHE_SHEET_NAME = 'ATH Cache'
-ORDERS_SHEET_NAME = 'Orders' 
+ORDERS_SHEET_NAME = 'Orders'
 
 # --- Apps Script Web App URL for Instant Triggers ---
-APPS_SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz_fhouljmK5Ad1q9wOfG0JjvJhZVAcAUupH8mmowbcUlMDG0wMP6h9XSfBsmihYvYh/exec" # <-- PASTE YOUR URL HERE
+APPS_SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycby81OHObXThiHoXFTRYl4UVKgjS0i9mWNf83tdO9twGXX9apaTw1sVv39c9sT99nZgS/exec" # <-- PASTE YOUR URL HERE
 
 # --- MODIFIED: Instrument master list URL and global variable ---
 INSTRUMENT_LIST_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
@@ -119,7 +119,7 @@ if os.path.exists("/etc/secrets/creds.json"):
 else:
     # Fallback for local development
     current_dir = os.path.dirname(__file__) if "__file__" in locals() else os.getcwd()
-    JSON_KEY_FILE_PATH = os.path.join(current_dir, "the-money-method-ad6d7-f95331cf5cbf.json")
+    JSON_KEY_FILE_PATH = os.path.join(current_dir, "the-money-method-ad6d7-6d23c192b74e.json")
 
 
 SCOPE = [
@@ -134,7 +134,7 @@ smart_ws = None
 gsheet = None
 Dashboard = None
 ATHCache = None
-OrdersSheet = None 
+OrdersSheet = None
 
 # --- Threading Lock for Data Safety ---
 data_lock = threading.Lock()
@@ -142,7 +142,7 @@ data_lock = threading.Lock()
 # --- Data Caching and State Management Variables ---
 # For Live Dashboard
 latest_tick_data = collections.defaultdict(dict)
-latest_quote_data = collections.defaultdict(dict) 
+latest_quote_data = collections.defaultdict(dict)
 excel_dashboard_details = collections.defaultdict(list)
 previous_ltp_data = {}
 previous_percentage_change_data = {}
@@ -160,6 +160,7 @@ monthly_high_cache = {}
 
 # For Subscription Management
 subscribed_tokens = set()
+scan_memory_cache = {} # <-- FIX: In-memory cache to prevent repetitive logging
 
 # --- Configuration Constants ---
 # General
@@ -173,7 +174,7 @@ SCRIP_SEARCH_RETRY_MULTIPLIER = 1.5
 HISTORICAL_DATA_RETRY_ATTEMPTS = 3
 HISTORICAL_DATA_RETRY_DELAY = 1.0
 HISTORICAL_DATA_RETRY_MULTIPLIER = 1.5
-QUOTE_API_MAX_TOKENS = 50 
+QUOTE_API_MAX_TOKENS = 50
 
 # For Live Dashboard
 INDEX_START_ROW = 100
@@ -219,7 +220,7 @@ QUARTER_CHG_COL = 'Q'
 # For ORH and 3% Down Setups
 ORH_EXCHANGE_COL = 'B'
 ORH_SYMBOL_COL = 'C'
-ORH_QTY_COL = 'I' 
+ORH_QTY_COL = 'I'
 ORH_TOKEN_COL = 'Y'
 ORH_RESULT_COL = 'G'
 ORH_BUY_STOP_COL = 'H'
@@ -249,7 +250,7 @@ def normalize_status(api_status):
     """
     if not api_status or not isinstance(api_status, str):
         return 'Unknown'
-        
+
     status_lower = api_status.lower()
 
     status_mapping = {
@@ -260,14 +261,14 @@ def normalize_status(api_status):
         'cancelled': 'Cancelled',
         'expired': 'Expired',
         'rejected': 'Rejected',
-        
+
         # Order Statuses from getOrderBook
         'open': 'Pending Execution',
         'pending': 'Pending Execution',
         'complete': 'Completed',
         'executed': 'Completed',
         # 'rejected' and 'cancelled' are already mapped above
-        
+
         # Custom statuses for tracking
         'not_found_in_gtt_list': 'GTT Rule Not Found',
         'not_found_in_order_book': 'Order Not in Book'
@@ -308,7 +309,7 @@ def get_full_name_from_yahoo(symbol, exchange):
         except Exception:
             logger.warning(f"Could not fetch data from Yahoo Finance for ticker {ticker}.")
             continue # Try the next ticker in the list
-    
+
     logger.warning(f"Could not find 'longName' for {symbol} on any exchange. Falling back to symbol.")
     stock_name_cache[base_symbol] = None # Cache the failure to avoid re-querying
     return symbol
@@ -333,11 +334,11 @@ def trigger_apps_script_alert(alert_type, row, symbol, exchange):
                 "row": row,
                 "stockName": full_stock_name or symbol # Fallback to symbol if name not found
             }
-            
+
             logger.info(f"Triggering Apps Script for {alert_type} on row {row} with payload: {payload}")
-            
+
             response = requests.post(APPS_SCRIPT_WEB_APP_URL, json=payload, timeout=20)
-            
+
             if response.status_code == 200:
                 logger.info(f"Successfully triggered Apps Script. Response: {response.text}")
             else:
@@ -519,14 +520,26 @@ class SmartWebSocketV2(object):
         pass
 
     def connect(self):
+        """
+        Establishes a WebSocket connection and implements a reconnect mechanism.
+        """
         headers = {"Authorization": self.auth_token, "x-api-key": self.api_key, "x-client-code": self.client_code, "x-feed-token": self.feed_token}
-        try:
-            self._is_connected_flag = False
-            update_connection_status("connecting")
-            self.wsapp = websocket.WebSocketApp(self.ROOT_URI, header=headers, on_open=self._on_open, on_error=self._on_error, on_close=self._on_close, on_message=self._on_message, on_ping=self._on_ping, on_pong=self._on_pong)
-            self.wsapp.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE}, ping_interval=self.HEART_BEAT_INTERVAL)
-        except Exception as e:
-            logger.error(f"Error occurred during WebSocket connection: {e}")
+
+        # --- FIX: Implement reconnect loop ---
+        self.DISCONNECT_FLAG = False
+        while not self.DISCONNECT_FLAG:
+            try:
+                self._is_connected_flag = False
+                update_connection_status("connecting")
+                logger.info("Attempting to connect WebSocket...")
+                self.wsapp = websocket.WebSocketApp(self.ROOT_URI, header=headers, on_open=self._on_open, on_error=self._on_error, on_close=self._on_close, on_message=self._on_message, on_ping=self._on_ping, on_pong=self._on_pong)
+                self.wsapp.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE}, ping_interval=self.HEART_BEAT_INTERVAL)
+            except Exception as e:
+                logger.error(f"Error occurred during WebSocket connection: {e}")
+
+            if not self.DISCONNECT_FLAG:
+                logger.warning("WebSocket connection lost. Retrying in 5 seconds...")
+                time.sleep(5)
 
     def close_connection(self):
         self.RESUBSCRIBE_FLAG = False
@@ -629,15 +642,15 @@ class MyWebSocketClient(SmartWebSocketV2):
             # To make this thread-safe, we check if the token is in a local copy of the setup details.
             with data_lock:
                 is_orh_token = token in excel_setup_details
-            
+
             if is_orh_token:
                 current_time = datetime.datetime.now()
                 interval = '3min'
                 candle_info = interval_ohlc_data[token][interval]
-                
+
                 minute_floor = (current_time.minute // 3) * 3
                 candle_start_dt = current_time.replace(minute=minute_floor, second=0, microsecond=0)
-                
+
                 # Check if a new 3-minute candle needs to be started
                 if candle_info.get('start_time') is None or candle_start_dt > candle_info['start_time']:
                     if candle_info.get('start_time') is not None:
@@ -647,7 +660,7 @@ class MyWebSocketClient(SmartWebSocketV2):
                             'close': candle_info['last_ltp'], 'start_time': candle_info['start_time']
                         }
                         completed_3min_candles[token].append(completed_candle)
-                        
+
                         # MODIFIED: Use ORH_MAX_CANDLES
                         if len(completed_3min_candles[token]) > ORH_MAX_CANDLES:
                             completed_3min_candles[token].pop(0)
@@ -656,7 +669,7 @@ class MyWebSocketClient(SmartWebSocketV2):
 
                     # Initialize the new candle
                     candle_info.update({'open': ltp_scaled, 'high': ltp_scaled, 'low': ltp_scaled, 'start_time': candle_start_dt})
-                
+
                 # Update the current (ongoing) candle with the latest tick
                 candle_info['high'] = max(candle_info.get('high', ltp_scaled), ltp_scaled)
                 candle_info['low'] = min(candle_info.get('low', ltp_scaled), ltp_scaled)
@@ -760,26 +773,26 @@ def fetch_historical_candles_for_3pct_down(smart_api_obj, tokens_to_fetch, inter
         to_dt = today - timedelta(days=2)
     else:
         to_dt = today
-    
+
     to_dt = to_dt.replace(hour=23, minute=59, second=59)
     days_to_last_monday = to_dt.weekday() + 7
     from_dt = datetime.datetime.combine(to_dt.date() - timedelta(days=days_to_last_monday), datetime.time.min)
-    
+
     from_date_str = from_dt.strftime("%Y-%m-%d %H:%M")
     to_date_str = to_dt.strftime("%Y-%m-%d %H:%M")
-    
+
     logger.info(f"Fetching {interval_api} candles from {from_date_str} to {to_date_str}...")
 
     with data_lock:
         setup_details_copy = excel_3pct_setup_details.copy()
         dynamic_setup_copy = excel_dynamic_setups.copy()
-        
+
         # Combine tokens from both setup types to avoid duplicate API calls
         all_tokens_to_fetch = set(tokens_to_fetch)
         for token, details in dynamic_setup_copy.items():
             if details:
                 all_tokens_to_fetch.add((token, details[0]['exchange_type']))
-        
+
         tokens_to_fetch_unique = list(all_tokens_to_fetch)
 
     for token_info in tokens_to_fetch_unique:
@@ -793,7 +806,7 @@ def fetch_historical_candles_for_3pct_down(smart_api_obj, tokens_to_fetch, inter
             symbol_name = dynamic_setup_copy[token][0].get('symbol', 'Unknown')
 
         exchange_str = {1: "NSE", 3: "BSE"}.get(exchange_type)
-        if not exchange_str: 
+        if not exchange_str:
             logger.warning(f"Cannot fetch history for token {token}, unknown exchange type {exchange_type}")
             time.sleep(1)
             continue
@@ -801,26 +814,26 @@ def fetch_historical_candles_for_3pct_down(smart_api_obj, tokens_to_fetch, inter
         try:
             historic_param = {"exchange": exchange_str, "symboltoken": token, "interval": interval_api, "fromdate": from_date_str, "todate": to_date_str}
             response = smart_api_obj.getCandleData(historic_param)
-            
+
             if response and response.get("status") and response.get("data"):
                 candle_data = response["data"]
-                
+
                 candle_history = []
                 for c in candle_data:
                     candle_history.append({
-                        'start_time': datetime.datetime.fromisoformat(c[0]), 'open': c[1], 'high': c[2], 
+                        'start_time': datetime.datetime.fromisoformat(c[0]), 'open': c[1], 'high': c[2],
                         'low': c[3], 'close': c[4], 'volume': c[5] if len(c) > 5 else 0
                     })
-                
+
                 with data_lock:
                     volume_history_3pct[token][interval_api] = candle_history
-                
+
                 logger.info(f"Fetched {len(candle_history)} candles for {symbol_name} ({interval_api}).")
             else:
                 logger.warning(f"Fetch error for {symbol_name} ({interval_api}). Message: {response.get('message', 'Unknown error')}")
         except Exception as e:
             logger.error(f"Exception fetching data for {symbol_name} ({interval_api}): {e}")
-        
+
         time.sleep(0.5)
 
 def fetch_monthly_highs(smart_api_obj, tokens_to_fetch):
@@ -855,7 +868,7 @@ def fetch_monthly_highs(smart_api_obj, tokens_to_fetch):
                 "todate": to_date_str
             }
             response = smart_api_obj.getCandleData(historic_param)
-            
+
             if response and response.get("status") and response.get("data"):
                 data = response["data"]
                 current_month_high = 0
@@ -864,12 +877,12 @@ def fetch_monthly_highs(smart_api_obj, tokens_to_fetch):
                 for c in data:
                     candle_date = datetime.datetime.fromisoformat(c[0]).date()
                     candle_high = c[2]
-                    
+
                     if candle_date.month == today.month and candle_date.year == today.year:
                         current_month_high = max(current_month_high, candle_high)
                     elif candle_date.month == prev_month_start.month and candle_date.year == prev_month_start.year:
                         prev_month_high = max(prev_month_high, candle_high)
-                
+
                 final_high = max(current_month_high, prev_month_high)
                 if final_high > 0:
                     with data_lock:
@@ -880,7 +893,7 @@ def fetch_monthly_highs(smart_api_obj, tokens_to_fetch):
                 logger.warning(f"Could not fetch monthly data for token {token}. Response: {response.get('message', 'Unknown error')}")
         except Exception as e:
             logger.error(f"Exception fetching monthly data for token {token}: {e}")
-        
+
         time.sleep(0.5) # API rate limiting
 
 def check_and_update_orh_setup():
@@ -890,9 +903,9 @@ def check_and_update_orh_setup():
     """
     logger.info("Checking latest 3-min candle for ORH setup...")
     updates_queued = []
-    
+
     dashboard_data = Dashboard.get_all_values()
-    
+
     with data_lock:
         setup_details_copy = excel_setup_details.copy()
 
@@ -908,10 +921,10 @@ def check_and_update_orh_setup():
         prev_high = prev_high_entry["high"]
         latest_candle = candles[-1]
         high, low, close = latest_candle['high'], latest_candle['low'], latest_candle['close']
-        
+
         for entry in filtered_symbol_entries:
             row, row_idx = entry["row"], entry["row"] - 1
-            
+
             current_orh_value = dashboard_data[row_idx][col_to_num(ORH_RESULT_COL) - 1] if len(dashboard_data) > row_idx and len(dashboard_data[row_idx]) >= col_to_num(ORH_RESULT_COL) else ""
 
             if "Yes" in current_orh_value:
@@ -920,9 +933,9 @@ def check_and_update_orh_setup():
             if high != low and close >= (low + 0.7 * (high - low)) and close > prev_high:
                 trigger_time_str = latest_candle['start_time'].strftime('%H:%M')
                 buy_stop_value = round(low * 0.995, 2)
-                
+
                 logger.info(f"ORH Triggered for {entry['symbol']} at {latest_candle['start_time']:%Y-%m-%d %H:%M:%S} > H:{high}, L:{low}, C:{close}")
-                
+
                 if winsound:
                     try:
                         winsound.Beep(1000, 400)
@@ -930,7 +943,7 @@ def check_and_update_orh_setup():
                         logger.warning(f"Sound alert failed: {e}")
 
                 updates_queued.append({"range": f"{ORH_RESULT_COL}{row}", "values": [[f"Yes, {high:.2f} ({trigger_time_str})"]]})
-                
+
                 if high > 0:
                     stop_loss_pct = (high - buy_stop_value) / high
                     buy_stop_output = f"{buy_stop_value:.2f} ({stop_loss_pct:.2%})"
@@ -950,7 +963,7 @@ def check_and_update_orh_setup():
                     if not quantity or int(quantity) <= 0:
                         logger.warning(f"Cannot create order for {symbol}, quantity is missing or zero in column I.")
                         continue
-                    
+
                     trigger_price = round(high * 1.005, 2)
 
                     new_order_row = [
@@ -963,7 +976,7 @@ def check_and_update_orh_setup():
                         trigger_price,
                         ""
                     ]
-                    
+
                     OrdersSheet.append_row(new_order_row, value_input_option='USER_ENTERED')
                     logger.info(f"Successfully created a pre-filled order row for {symbol} in the 'Orders' sheet.")
 
@@ -984,7 +997,7 @@ def check_and_update_price_volume_setups():
     """
     logger.info("Checking for Price/Volume setups with proximity consolidation and price sorting...")
     updates_queued = []
-    
+
     try:
         # Fetch current values from the sheet to prevent redundant updates
         pct_down_result_col_values = Dashboard.col_values(col_to_num(PCT_DOWN_RESULT_COL))
@@ -1008,7 +1021,7 @@ def check_and_update_price_volume_setups():
         """
         # 1. Get all valid candidate candles
         available_candles = [
-            {'candle': c, 'interval_api': interval_api} 
+            {'candle': c, 'interval_api': interval_api}
             for interval_api, c in candle_dict.items() if c
         ]
         if not available_candles:
@@ -1035,7 +1048,7 @@ def check_and_update_price_volume_setups():
         for group in groups:
             best_in_group = max(group, key=lambda info: CANDLE_INTERVALS_3PCT_API.index(info['interval_api']))
             unique_signals.append(best_in_group)
-        
+
         # 4. Sort the final unique signals by low price, descending (high to low)
         sorted_unique_signals = sorted(unique_signals, key=lambda info: info['candle']['low'], reverse=True)
 
@@ -1069,7 +1082,7 @@ def check_and_update_price_volume_setups():
             gainer_candles = [c for c in candle_history if c.get('open', 0) > 0]
             if gainer_candles:
                 highest_up_candles[interval_api] = max(gainer_candles, key=lambda c: (c['close'] - c['open']) / c['open'])
-        
+
         # --- Phase 2: Consolidate and format outputs using the new logic ---
         final_output_3_pct = format_consolidated_output(three_pct_down_candles)
         final_output_high_vol = format_consolidated_output(high_vol_candles)
@@ -1107,7 +1120,7 @@ def check_and_update_dynamic_setups():
     candle analysis, now with intelligent consolidation logic.
     """
     logger.info("Checking for dynamic setups with consolidation...")
-    
+
     with data_lock:
         dynamic_setups_copy = excel_dynamic_setups.copy()
         volume_history_copy = volume_history_3pct.copy()
@@ -1133,17 +1146,17 @@ def check_and_update_dynamic_setups():
                     if "High of Highest Up candle" in cell_value: header_map['high_up'] = col_letter
                 logger.info(f"Found dynamic setup headers at row {header_row_idx + 1}. Header map: {header_map}")
                 break
-        
+
         if header_row_idx == -1 or not all(k in header_map for k in ['symbol', 'exchange', 'low_down', 'high_up']):
             logger.warning("Could not find the required headers for the dynamic setup on the Dashboard sheet. Skipping.")
             return
 
         updates_queued = []
-        
+
         # --- NEW: Reusable consolidation function ---
         def format_dynamic_consolidated_output(candle_dict, price_key_to_group, price_key_to_display):
             if not candle_dict: return ""
-            
+
             available_candles = [{'candle': c, 'interval_api': interval_api} for interval_api, c in candle_dict.items() if c]
             if not available_candles: return ""
 
@@ -1168,13 +1181,13 @@ def check_and_update_dynamic_setups():
                 candle = signal_info['candle']
                 interval_name = CANDLE_INTERVAL_MAP_DISPLAY[signal_info['interval_api']]
                 output_parts.append(f"{candle[price_key_to_display]:.2f} ({interval_name})")
-            
+
             return ", ".join(output_parts)
 
         # --- Part 2: Process each symbol in the dynamic list ---
         for token, symbol_entries in dynamic_setups_copy.items():
             if not symbol_entries: continue
-            
+
             highest_down_candles = {}
             highest_up_candles = {}
 
@@ -1206,10 +1219,10 @@ def check_and_update_dynamic_setups():
 
                 if final_output_low_down.strip() != str(current_low_down_val).strip():
                     updates_queued.append({'range': f"{header_map['low_down']}{row}", 'values': [[final_output_low_down]]})
-                
+
                 if final_output_high_up.strip() != str(current_high_up_val).strip():
                     updates_queued.append({'range': f"{header_map['high_up']}{row}", 'values': [[final_output_high_up]]})
-        
+
         if updates_queued:
             Dashboard.batch_update(updates_queued)
             logger.info(f"Applied {len(updates_queued)} dynamic setup updates to Dashboard.")
@@ -1256,11 +1269,11 @@ def check_and_place_orders():
                 # Trigger from Column L (index 11)
                 if len(row_data) < 12: continue
                 trigger_status = str(row_data[11]).strip().upper()
-                
+
                 if trigger_status != 'PENDING': continue
 
                 logger.info(f"Found a pending submission on row {row_num}: {row_data}")
-                
+
                 # Immediately update status to 'PROCESSING' to prevent re-submission
                 updates_to_make.append({'range': f'J{row_num}', 'values': [['PROCESSING']]})
                 # Clear the trigger column immediately in the same batch
@@ -1272,10 +1285,10 @@ def check_and_place_orders():
                 order_type = str(row_data[5]).upper()
                 quantity = int(row_data[6])
                 price_or_trigger = float(row_data[7] or 0)
-                
+
                 if not all([symbol, exchange, action, order_type, quantity > 0]):
                     raise ValueError("Missing or invalid required fields (Symbol, Exchange, Action, Type, Qty)")
-                
+
                 token_cache = {}
                 instrument_info = get_or_fetch_instrument_details(symbol, exchange, token_cache)
                 if not instrument_info:
@@ -1284,7 +1297,7 @@ def check_and_place_orders():
 
                 order_id_or_rule_id = None
                 response_data = None # Initialize response data for logging
-                
+
                 if order_type == 'GTT':
                     logger.info(f"Submitting GTT order for row {row_num}...")
                     gtt_params = {
@@ -1293,13 +1306,13 @@ def check_and_place_orders():
                         "qty": quantity, "triggerprice": price_or_trigger, "disclosedqty": 0, "timeperiod": 365
                     }
                     response_data = smart_api_obj.gttCreateRule(gtt_params)
-                    
+
                     if isinstance(response_data, int) and response_data > 0:
                         order_id_or_rule_id = response_data
                     elif isinstance(response_data, dict) and response_data.get("data"):
                         data_payload = response_data["data"]
                         order_id_or_rule_id = data_payload.get("ruleid") if isinstance(data_payload, dict) else data_payload
-                    
+
                     if not order_id_or_rule_id:
                         error_message = "GTT creation failed."
                         if isinstance(response_data, dict):
@@ -1323,7 +1336,7 @@ def check_and_place_orders():
                         order_params["price"] = 0.0
 
                     response_data = smart_api_obj.placeOrder(order_params)
-                    
+
                     if isinstance(response_data, dict) and response_data.get("data", {}).get("orderid"):
                         order_id_or_rule_id = response_data["data"]["orderid"]
                     else:
@@ -1341,9 +1354,9 @@ def check_and_place_orders():
                 error_text = str(e.message) if hasattr(e, 'message') and e.message else str(e)
                 logger.error(f"Failed to process order for row {row_num}: {error_text}")
                 updates_to_make.append({'range': f'J{row_num}:K{row_num}', 'values': [['ERROR', error_text]]})
-            
+
             time.sleep(1) # Rate limit API calls
-        
+
         # --- BATCH UPDATE AT THE END ---
         if updates_to_make:
             OrdersSheet.batch_update(updates_to_make, value_input_option='USER_ENTERED')
@@ -1360,7 +1373,7 @@ def check_and_update_order_statuses():
     """
     try:
         if not OrdersSheet or not smart_api_obj: return
-        
+
         # --- 1. Fetch all data from sheet and APIs upfront with robust error handling ---
         all_order_rows = OrdersSheet.get_all_values()
         if len(all_order_rows) < 3: return
@@ -1389,7 +1402,7 @@ def check_and_update_order_statuses():
         order_status_map = {order['orderid']: order for order in order_book_raw.get('data', [])} if order_book_raw and order_book_raw.get('data') else {}
 
         updates_queued = []
-        
+
         # --- 3. Iterate through sheet rows and update status ---
         for idx, row in enumerate(all_order_rows):
             row_num = idx + 1
@@ -1398,7 +1411,7 @@ def check_and_update_order_statuses():
             try:
                 # Columns: C=Symbol(2), D=Exch(3), E=Action(4), F=Type(5), G=Qty(6), J=Status(9), K=ID(10)
                 if len(row) < 11: continue
-                
+
                 current_status_on_sheet = str(row[9]).strip().upper()
                 order_id = str(row[10]).strip()
                 order_type = str(row[5]).strip().upper()
@@ -1419,21 +1432,21 @@ def check_and_update_order_statuses():
                         # --- "Bridge the Gap": Handle GTT-to-Order transition ---
                         if new_status_normalized == 'Triggered - Awaiting ID':
                             logger.info(f"GTT rule {order_id} triggered. Searching for matching exchange order...")
-                            
+
                             gtt_rule = gtt_status_map[order_id]
                             found_match = False
                             for live_order in order_status_map.values():
                                 if (live_order['tradingsymbol'] == gtt_rule['tradingsymbol'] and
                                     str(live_order['quantity']) == str(gtt_rule['qty']) and
                                     live_order['transactiontype'] == gtt_rule['transactiontype']):
-                                    
+
                                     new_exchange_id = live_order['orderid']
                                     logger.info(f"Found matching exchange order for GTT {order_id}. New Order ID: {new_exchange_id}")
-                                    
+
                                     # Update Order ID to new exchange ID and Type to GTT-LIMIT
                                     updates_queued.append({'range': f'F{row_num}', 'values': [['GTT-LIMIT']]})
                                     updates_queued.append({'range': f'K{row_num}', 'values': [[new_exchange_id]]})
-                                    
+
                                     # Get status of the new order
                                     raw_api_status = live_order['status']
                                     new_status_normalized = normalize_status(raw_api_status)
@@ -1468,7 +1481,7 @@ def check_and_update_order_statuses():
             except Exception as e:
                 logger.warning(f"Could not check status for row {row_num}: {e}")
                 continue
-        
+
         # --- 4. Batch update the sheet ---
         if updates_queued:
             OrdersSheet.batch_update(updates_queued, value_input_option='USER_ENTERED')
@@ -1492,7 +1505,7 @@ def check_and_update_breakdown_status():
     logger.info("Checking for breakdown status and suggestions...")
     value_updates = []
     format_updates = []
-    
+
     with data_lock:
         setup_details_copy = excel_3pct_setup_details.copy()
         volume_history_copy = volume_history_3pct.copy()
@@ -1501,7 +1514,7 @@ def check_and_update_breakdown_status():
         return
 
     rev_interval_map = {v: k for k, v in CANDLE_INTERVAL_MAP_DISPLAY.items()}
-    
+
     setups_to_check = [
         {'result_col': HIGHEST_UP_CANDLE_COL, 'status_col': HIGHEST_UP_CANDLE_STATUS_COL},
         {'result_col': HIGH_VOL_RESULT_COL, 'status_col': HIGH_VOL_STATUS_COL},
@@ -1513,7 +1526,7 @@ def check_and_update_breakdown_status():
         all_cols.extend([SUGGESTION_COL, FULL_QTY_COL]) # Add suggestion and quantity columns
         start_col = min(all_cols, key=col_to_num)
         end_col = max(all_cols, key=col_to_num)
-        
+
         last_row = max((e['row'] for token, entries in setup_details_copy.items() for e in entries if entries), default=0)
         if last_row < START_ROW_DATA:
             return
@@ -1546,19 +1559,19 @@ def check_and_update_breakdown_status():
 
                 signal_text = sheet_data[row_idx][result_col_idx] if len(sheet_data[row_idx]) > result_col_idx else ""
                 current_status = sheet_data[row_idx][status_col_idx] if len(sheet_data[row_idx]) > status_col_idx else ""
-                
+
                 signals = re.findall(r"(\d+\.?\d*)\s*\(([^)]+)\)", str(signal_text))
-                
+
                 breakdown_count = 0
                 if signals:
                     for low_str, timeframe_str in signals:
                         signal_low = float(low_str)
                         api_timeframe = rev_interval_map.get(timeframe_str.strip())
-                        
+
                         if not api_timeframe: continue
                         candle_history = volume_history_copy.get(token, {}).get(api_timeframe)
                         if not candle_history: continue
-                        
+
                         last_completed_candle = candle_history[-1]
                         if last_completed_candle['close'] < signal_low:
                             breakdown_count += 1
@@ -1566,10 +1579,10 @@ def check_and_update_breakdown_status():
                                 'close': last_completed_candle['close'],
                                 'low': signal_low
                             })
-                
+
                 new_status = "/".join(["Breakdown"] * breakdown_count) if breakdown_count > 0 else ""
                 row_statuses[status_col_letter] = new_status
-                
+
                 if new_status != current_status.strip():
                     value_updates.append({"range": f"{status_col_letter}{row}", "values": [[new_status]]})
 
@@ -1582,20 +1595,20 @@ def check_and_update_breakdown_status():
             status_ae = row_statuses.get(PCT_DOWN_STATUS_COL, "")
 
             exit_100_triggered = False
-            
+
             if "Breakdown/Breakdown" in status_aa or "Breakdown/Breakdown" in status_ac or "Breakdown/Breakdown" in status_ae:
                 exit_100_triggered = True
-                
+
                 breakdown_closes = []
                 if "Breakdown/Breakdown" in status_aa: breakdown_closes.extend([d['close'] for d in breakdown_details[HIGHEST_UP_CANDLE_STATUS_COL]])
                 if "Breakdown/Breakdown" in status_ac: breakdown_closes.extend([d['close'] for d in breakdown_details[HIGH_VOL_STATUS_COL]])
                 if "Breakdown/Breakdown" in status_ae: breakdown_closes.extend([d['close'] for d in breakdown_details[PCT_DOWN_STATUS_COL]])
-                
+
                 exit_at_price = min(breakdown_closes) if breakdown_closes else 0
 
                 qty_col_idx = col_to_num(FULL_QTY_COL) - col_to_num(start_col)
                 qty_str = sheet_data[row_idx][qty_col_idx] if len(sheet_data[row_idx]) > qty_col_idx else "0"
-                
+
                 try:
                     qty = int(float(str(qty_str).replace(',', '')))
                     new_suggestion = f"Exit 100% at {exit_at_price:.2f} ({qty})"
@@ -1604,13 +1617,15 @@ def check_and_update_breakdown_status():
 
             if not exit_100_triggered:
                 breakdown_columns_count = sum(1 for status in [status_aa, status_ac, status_ae] if "Breakdown" in status)
-                
-                if breakdown_columns_count == 2:
+
+                # --- START: MODIFIED LOGIC ---
+                if breakdown_columns_count >= 2:
+                # --- END: MODIFIED LOGIC ---
                     breakdown_closes = []
                     if "Breakdown" in status_aa: breakdown_closes.extend([d['close'] for d in breakdown_details[HIGHEST_UP_CANDLE_STATUS_COL]])
                     if "Breakdown" in status_ac: breakdown_closes.extend([d['close'] for d in breakdown_details[HIGH_VOL_STATUS_COL]])
                     if "Breakdown" in status_ae: breakdown_closes.extend([d['close'] for d in breakdown_details[PCT_DOWN_STATUS_COL]])
-                    
+
                     exit_at_price = min(breakdown_closes) if breakdown_closes else 0
 
                     all_signal_lows = []
@@ -1619,12 +1634,12 @@ def check_and_update_breakdown_status():
                         text = sheet_data[row_idx][col_idx] if len(sheet_data[row_idx]) > col_idx else ""
                         signals_in_cell = re.findall(r"(\d+\.?\d*)\s*\(([^)]+)\)", str(text))
                         all_signal_lows.extend([float(signal[0]) for signal in signals_in_cell])
-                    
+
                     trail_to_price = min(all_signal_lows) if all_signal_lows else 0
 
                     qty_col_idx = col_to_num(FULL_QTY_COL) - col_to_num(start_col)
                     qty_str = sheet_data[row_idx][qty_col_idx] if len(sheet_data[row_idx]) > qty_col_idx else "0"
-                    
+
                     try:
                         qty = int(float(str(qty_str).replace(',', '')))
                         half_qty = round(qty / 2)
@@ -1635,7 +1650,7 @@ def check_and_update_breakdown_status():
             # --- MODIFIED LOGIC FOR TRIGGERING ALERTS ---
             suggestion_col_idx = col_to_num(SUGGESTION_COL) - col_to_num(start_col)
             current_suggestion_on_sheet = sheet_data[row_idx][suggestion_col_idx] if len(sheet_data[row_idx]) > suggestion_col_idx else ""
-            
+
             # Helper function to get the core instruction type ("100%", "50%", or "Blank")
             def get_suggestion_type(suggestion_str):
                 if "100%" in suggestion_str:
@@ -1646,7 +1661,7 @@ def check_and_update_breakdown_status():
 
             current_suggestion_type = get_suggestion_type(current_suggestion_on_sheet)
             new_suggestion_type = get_suggestion_type(new_suggestion)
-            
+
             # Only update the sheet if the text is different
             if new_suggestion.strip() != current_suggestion_on_sheet.strip():
                  value_updates.append({"range": f"{SUGGESTION_COL}{row}", "values": [[new_suggestion]]})
@@ -1654,7 +1669,7 @@ def check_and_update_breakdown_status():
             # Only send a trigger if the *type* of instruction has changed
             if new_suggestion_type != current_suggestion_type:
                 logger.info(f"Suggestion TYPE CHANGE DETECTED for {entry['symbol']} at row {row}: from '{current_suggestion_type}' to '{new_suggestion_type}'")
-                
+
                 if new_suggestion.strip(): # Only send trigger if there's a new suggestion
                     logger.info(f"Sending 'position_closed' trigger for row {row}.")
                     trigger_apps_script_alert("position_closed", row, entry['symbol'], entry['exchange'])
@@ -1711,7 +1726,7 @@ def get_or_fetch_instrument_details(symbol_name, exchange_name, session_cache):
                     "name": instrument.get('name')
                 }
                 break
-    
+
     if instrument_details:
         session_cache[cache_key] = instrument_details
     else:
@@ -1725,13 +1740,13 @@ def scan_sheet_for_all_symbols(Dashboard, ATHCache):
     This function now handles updates and deletions of tokens in the ATH Cache.
     """
     logger.info("Scanning Google Sheet for all symbols (Dashboard and Setups)...")
-    
+
     local_dashboard_details = collections.defaultdict(list)
     local_setup_details = collections.defaultdict(list)
     local_3pct_setup_details = collections.defaultdict(list)
     local_dynamic_setups = collections.defaultdict(list) # <-- NEW
     all_tokens_found = set()
-    
+
     scan_session_token_cache = {}
     expected_ath_cache_state = {}
     ath_cache_updates_queued = []
@@ -1775,33 +1790,35 @@ def scan_sheet_for_all_symbols(Dashboard, ATHCache):
         last_row_focus = get_last_row_in_column(Dashboard, FOCUS_SYMBOL_COL)
         last_row_full = get_last_row_in_column(Dashboard, FULL_SYMBOL_COL)
         max_row_dashboard = max(last_row_focus, last_row_full)
-        
+
         logger.info(f"Scanning Dashboard up to row {max_row_dashboard}...")
 
-        for row in range(START_ROW_DATA, max_row_dashboard + 20): 
-            
+        for row in range(START_ROW_DATA, max_row_dashboard + 20):
+
             def process_symbol(symbol, exchange, row_num, token_col, block_details):
-                if not symbol or not exchange:
+                symbol_clean = str(symbol).strip().upper()
+                symbol_col = block_details.get('symbol_col')
+
+                # --- FIX 1: Ignore placeholder "SYMBOL" text ---
+                if not symbol or not exchange or symbol_clean == 'SYMBOL':
                     return
 
-                instrument_info = None
-                map_key = (row_num, token_col)
-                cached_info = symbol_token_map.get(map_key)
+                # --- FIX 2: Use in-memory cache to prevent repetitive logging ---
+                cache_key = (row_num, symbol_col)
+                cached_symbol = scan_memory_cache.get(cache_key)
 
-                if cached_info and cached_info[0] == symbol.strip().upper():
-                    # If symbol hasn't changed, we can trust the token, but we still need the full name.
-                    instrument_info = get_or_fetch_instrument_details(symbol, exchange, scan_session_token_cache)
-                else:
-                    if cached_info:
-                        logger.info(f"Symbol changed at {map_key}: from '{cached_info[0]}' to '{symbol.strip().upper()}'. Fetching new details.")
-                    else:
-                        logger.info(f"New symbol '{symbol.strip().upper()}' found at {map_key}. Fetching new details.")
-                    instrument_info = get_or_fetch_instrument_details(symbol, exchange, scan_session_token_cache)
-                
+                # Log only if the symbol is new for this location or has changed
+                if cached_symbol != symbol_clean:
+                    logger.info(f"New or changed symbol '{symbol_clean}' found at {cache_key}. Fetching new details.")
+                    scan_memory_cache[cache_key] = symbol_clean
+
+                # Now, proceed with the original logic to get instrument details
+                instrument_info = get_or_fetch_instrument_details(symbol, exchange, scan_session_token_cache)
+
                 if instrument_info and instrument_info.get('token'):
                     token = instrument_info['token']
                     all_tokens_found.add(token)
-                    
+
                     # Store the full name along with other details
                     block_details['name'] = instrument_info.get('name')
 
@@ -1818,7 +1835,7 @@ def scan_sheet_for_all_symbols(Dashboard, ATHCache):
                             elif block_details['setup_type'] == 'DYNAMIC': # <-- NEW
                                 local_dynamic_setups[token].append(setup_info)
                     if token_col: # Only update ATH cache for setups that use it
-                        expected_ath_cache_state[map_key] = token
+                        expected_ath_cache_state[(row_num, token_col)] = token
 
             # --- MODIFIED: Removed the hardcoded row limits ---
             exchange_focus = get_cell_value(all_dashboard_values, row, FOCUS_EXCHANGE_COL)
@@ -1833,32 +1850,32 @@ def scan_sheet_for_all_symbols(Dashboard, ATHCache):
             symbol_full = get_cell_value(all_dashboard_values, row, FULL_SYMBOL_COL)
             if exchange_full and symbol_full:
                 process_symbol(symbol_full, exchange_full, row, ATH_CACHE_Z_COL_DASH, {
-                    'ltp_col': FULL_LTP_COL, 'chg_col': '', 'block_type': 'Full Positions', 
+                    'ltp_col': FULL_LTP_COL, 'chg_col': '', 'block_type': 'Full Positions',
                     'symbol_col': FULL_SYMBOL_COL, 'token_cache_col': ATH_CACHE_Z_COL_DASH,
-                    'price_col': FULL_PRICE_COL, 'qty_col': FULL_QTY_COL, 
+                    'price_col': FULL_PRICE_COL, 'qty_col': FULL_QTY_COL,
                     'return_amt_col': FULL_RETURN_AMT_COL, 'return_pct_col': FULL_RETURN_PCT_COL,
                     'swing_low_input_col': SWING_LOW_INPUT_COL, 'percent_from_swing_low_col': PERCENT_FROM_SWING_LOW_COL,
-                    'highest_up_candle_col': HIGHEST_UP_CANDLE_COL, 'entry_date_col': FULL_ENTRY_DATE_COL, 
+                    'highest_up_candle_col': HIGHEST_UP_CANDLE_COL, 'entry_date_col': FULL_ENTRY_DATE_COL,
                     'days_duration_col': FULL_DAYS_DURATION_COL
                 })
 
             exchange_orh = get_cell_value(all_dashboard_values, row, ORH_EXCHANGE_COL)
             symbol_orh = get_cell_value(all_dashboard_values, row, ORH_SYMBOL_COL)
             if exchange_orh and symbol_orh and row <= ORH_MAX_ROW:
-                process_symbol(symbol_orh, exchange_orh, row, ORH_TOKEN_COL, {'setup_type': 'ORH'})
-            
+                process_symbol(symbol_orh, exchange_orh, row, ORH_TOKEN_COL, {'setup_type': 'ORH', 'symbol_col': ORH_SYMBOL_COL})
+
             exchange_3pct = get_cell_value(all_dashboard_values, row, PCT_EXCHANGE_COL_3PCT)
             symbol_3pct = get_cell_value(all_dashboard_values, row, PCT_SYMBOL_COL_3PCT)
             if exchange_3pct and symbol_3pct:
-                process_symbol(symbol_3pct, exchange_3pct, row, PCT_TOKEN_COL_3PCT, {'setup_type': '3PCT'})
-            
+                process_symbol(symbol_3pct, exchange_3pct, row, PCT_TOKEN_COL_3PCT, {'setup_type': '3PCT', 'symbol_col': PCT_SYMBOL_COL_3PCT})
+
             # --- NEW: Process symbols for the dynamic setup ---
             if dynamic_setup_start_row and row >= dynamic_setup_start_row:
                 exchange_dyn = get_cell_value(all_dashboard_values, row, dynamic_setup_exchange_col)
                 symbol_dyn = get_cell_value(all_dashboard_values, row, dynamic_setup_symbol_col)
                 if exchange_dyn and symbol_dyn:
                     # Dynamic setups don't write to the ATH Cache, so token_col is None
-                    process_symbol(symbol_dyn, exchange_dyn, row, None, {'setup_type': 'DYNAMIC'})
+                    process_symbol(symbol_dyn, exchange_dyn, row, None, {'setup_type': 'DYNAMIC', 'symbol_col': dynamic_setup_symbol_col})
             # ----------------------------------------------------
 
         max_row_ath_cache_data = len(all_ath_cache_values) if all_ath_cache_values else 0
@@ -1866,7 +1883,7 @@ def scan_sheet_for_all_symbols(Dashboard, ATHCache):
         token_cols_to_check = [ATH_CACHE_Y_COL_DASH, ATH_CACHE_Z_COL_DASH]
 
         for row_idx in range(rows_to_check_ath_cache):
-            row_num = row_idx + 1 
+            row_num = row_idx + 1
             for col_letter in token_cols_to_check:
                 current_token_in_ath_cache = get_cell_value(all_ath_cache_values, row_num, col_letter)
                 expected_token_for_row_col = expected_ath_cache_state.get((row_num, col_letter))
@@ -1901,7 +1918,7 @@ def update_excel_live_data():
     Updates the Google Sheet with live data and the new Swing Low calculation.
     """
     global cells_to_clear_color
-    
+
     with data_lock:
         dashboard_details_copy = excel_dashboard_details.copy()
         monthly_high_cache_copy = monthly_high_cache.copy()
@@ -1914,7 +1931,7 @@ def update_excel_live_data():
     GREEN_COLOR, RED_COLOR = (149, 203, 186), (254, 112, 112)
     YELLOW_COLOR = (249, 203, 156) # Define yellow color for swing low
     dashboard_sheet_id = Dashboard.id
-    
+
     cells_to_color_this_cycle = set()
 
     if cells_to_clear_color:
@@ -1923,16 +1940,16 @@ def update_excel_live_data():
             row_num = int(''.join(filter(str.isdigit, cell_a1)))
             cell_range = {"sheetId": dashboard_sheet_id, "startRowIndex": row_num - 1, "endRowIndex": row_num, "startColumnIndex": col_to_num(col_letter) - 1, "endColumnIndex": col_to_num(col_letter)}
             requests.append({"repeatCell": {"range": cell_range, "cell": {"userEnteredFormat": {"backgroundColor": rgb_to_float(None)}}, "fields": "userEnteredFormat.backgroundColor"}})
-    
+
     cells_to_clear_color.clear()
 
     input_ranges = []
     for list_of_details in dashboard_details_copy.values():
         for details in list_of_details:
             row_num = details['row']
-            if details.get("symbol_col"): 
+            if details.get("symbol_col"):
                 input_ranges.append(f'{details["symbol_col"]}{row_num}')
-            
+
             if details.get('block_type') == "Full Positions":
                 if details.get("price_col"): input_ranges.append(f'{details["price_col"]}{row_num}')
                 if details.get("qty_col"): input_ranges.append(f'{details["qty_col"]}{row_num}')
@@ -1952,6 +1969,8 @@ def update_excel_live_data():
                 input_data[a1_notation] = val_list[0][0] if val_list and val_list[0] else None
         except Exception as e:
             logger.error(f"Error fetching dashboard input data in batch: {e}")
+            # --- FIX: Exit the function immediately if the data fetch fails ---
+            return
 
     for token, list_of_details in dashboard_details_copy.items():
         current_ltp = latest_tick_data.get(token, {}).get('ltp')
@@ -1965,36 +1984,36 @@ def update_excel_live_data():
 
         for details in list_of_details:
             row_num = details['row']
-            
+
             symbol_on_sheet_raw = input_data.get(f"{details.get('symbol_col')}{row_num}")
             symbol_on_sheet = str(symbol_on_sheet_raw).strip().upper() if symbol_on_sheet_raw else ""
 
             if not symbol_on_sheet:
-                if details.get('block_type') == "Focus List": 
+                if details.get('block_type') == "Focus List":
                     start_col, end_col = 'D', 'J'
-                elif details.get('block_type') == "Full Positions": 
+                elif details.get('block_type') == "Full Positions":
                     start_col, end_col = 'N', 'AG'
-                else: 
+                else:
                     continue
-                
+
                 logger.info(f"Detected cleared symbol at row {row_num}. Queuing fast clear for {start_col}{row_num}:{end_col}{row_num}.")
-                
+
                 requests.append({
                     "repeatCell": {
                         "range": {
-                            "sheetId": dashboard_sheet_id, 
-                            "startRowIndex": row_num - 1, "endRowIndex": row_num, 
+                            "sheetId": dashboard_sheet_id,
+                            "startRowIndex": row_num - 1, "endRowIndex": row_num,
                             "startColumnIndex": col_to_num(start_col) - 1, "endColumnIndex": col_to_num(end_col)
-                        }, 
+                        },
                         "cell": {
-                            "userEnteredValue": {}, 
+                            "userEnteredValue": {},
                             "userEnteredFormat": { "backgroundColor": rgb_to_float(None) }
-                        }, 
+                        },
                         "fields": "userEnteredValue,userEnteredFormat.backgroundColor"
                     }
                 })
                 continue
-            
+
             def queue_update(col_letter, value, number_format_pattern=None, bg_color='SENTINEL', is_ltp=False):
                 if not col_letter: return
                 cell_a1 = f"{col_letter}{row_num}"
@@ -2005,10 +2024,10 @@ def update_excel_live_data():
                 else: user_entered_value["stringValue"] = str(value)
                 cell_data["userEnteredValue"] = user_entered_value
                 fields.append("userEnteredValue")
-                
+
                 user_entered_format = {}
                 format_fields = []
-                
+
                 if bg_color != 'SENTINEL':
                     user_entered_format["backgroundColor"] = rgb_to_float(bg_color)
                     format_fields.append("backgroundColor")
@@ -2023,11 +2042,11 @@ def update_excel_live_data():
                     cell_data["userEnteredFormat"] = user_entered_format
                     for key in format_fields:
                         fields.append(f"userEnteredFormat.{key}")
-                
+
                 requests.append({"updateCells": {"rows": [{"values": [cell_data]}], "fields": ",".join(fields), "range": cell_range}})
 
             queue_update(details.get('ltp_col'), current_ltp, "#,##0.00", bg_color=ltp_cell_color, is_ltp=True)
-            
+
             if details.get('chg_col') and token in latest_quote_data:
                 percentage_change = latest_quote_data[token].get('percentChange', 0.0)
                 percentage_change_decimal = percentage_change / 100.0 if percentage_change is not None else 0.0
@@ -2043,13 +2062,13 @@ def update_excel_live_data():
                     qty_val = float(qty_val_str) if qty_val_str else 0
                 except (ValueError, TypeError) as e:
                     logger.warning(f"Could not parse numeric values for row {row_num}. Error: {e}"); continue
-                
+
                 if price_val and qty_val:
                     return_amt = (current_ltp - price_val) * qty_val
                     return_pct = (current_ltp - price_val) / price_val if price_val != 0 else 0
                     queue_update(details.get('return_amt_col'), return_amt, "#,##0.00", bg_color=(GREEN_COLOR if return_amt > 0 else RED_COLOR if return_amt < 0 else None))
                     queue_update(details.get('return_pct_col'), return_pct, "0.00%", bg_color=(GREEN_COLOR if return_pct > 0 else RED_COLOR if return_pct < 0 else None))
-                
+
                 swing_low_str = str(input_data.get(f'{details.get("swing_low_input_col")}{row_num}') or '').replace(',','')
                 swing_low_val = None
                 try:
@@ -2081,7 +2100,7 @@ def update_excel_live_data():
                     try: days_duration = f"{(datetime.datetime.now() - datetime.datetime.strptime(entry_date_str, '%d-%b-%y')).days} Days"
                     except ValueError: days_duration = "Invalid Date"
                 queue_update(details.get('days_duration_col'), days_duration, "@")
-    
+
     if requests:
         try:
             gsheet.batch_update({'requests': requests})
@@ -2139,12 +2158,12 @@ def run_quote_updater():
                 tokens_by_exchange[exchange].append(token)
 
             new_quote_data = {}
-            
+
             for exchange, tokens_list in tokens_by_exchange.items():
                 for i in range(0, len(tokens_list), QUOTE_API_MAX_TOKENS):
                     batch_tokens = tokens_list[i:i + QUOTE_API_MAX_TOKENS]
                     payload = {"mode": "FULL", "exchangeTokens": {exchange: batch_tokens}}
-                    
+
                     logger.info(f"Fetching market data for {len(batch_tokens)} tokens on {exchange}...")
                     response = smart_api_obj.getMarketData(**payload)
 
@@ -2157,7 +2176,7 @@ def run_quote_updater():
                                     new_quote_data[token] = {"percentChange": item.get("percentChange"), "netChange": item.get("netChange")}
                     else:
                         logger.warning(f"Could not fetch quote data for batch (Exchange: {exchange}, Tokens: {batch_tokens}). Response: {response}")
-                    
+
                     time.sleep(0.5)
 
             with data_lock:
@@ -2175,7 +2194,7 @@ def run_initial_setup_data_fetch():
     for the setups without blocking the main application startup.
     """
     logger.info("Starting background fetch for initial setup data...")
-    
+
     with data_lock:
         orh_details_copy = excel_setup_details.copy()
         pct3_details_copy = excel_3pct_setup_details.copy()
@@ -2183,7 +2202,7 @@ def run_initial_setup_data_fetch():
 
     fetch_initial_candle_data(smart_api_obj, orh_details_copy)
     fetch_previous_day_candle_data(smart_api_obj, orh_details_copy)
-    
+
     # Combine all tokens that need historical data
     all_tokens_for_history = set()
     for token, details in pct3_details_copy.items():
@@ -2197,12 +2216,12 @@ def run_initial_setup_data_fetch():
 
     for interval_api in CANDLE_INTERVALS_3PCT_API:
         fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_for_history, interval_api)
-    
+
     # After initial fetch, run the checks
     check_and_update_price_volume_setups()
     check_and_update_breakdown_status()
     check_and_update_dynamic_setups() # <-- NEW
-    
+
     logger.info("Background fetch for initial setup data complete.")
 
 def sort_full_positions():
@@ -2220,7 +2239,7 @@ def sort_full_positions():
         # 1. Read all data for the section to be sorted
         range_to_sort = f"{FULL_EXCHANGE_COL}{START_ROW_DATA}:{FULL_POSITIONS_END_COL}{last_row}"
         dashboard_data = Dashboard.get(range_to_sort)
-        
+
         # Read the corresponding tokens from the cache
         token_range = f"{ATH_CACHE_Z_COL_DASH}{START_ROW_DATA}:{ATH_CACHE_Z_COL_DASH}{last_row}"
         token_data = ATHCache.get(token_range)
@@ -2243,7 +2262,7 @@ def sort_full_positions():
             # Safely access the data using the calculated indices
             month_val = to_float(row_data[month_col_index]) if len(row_data) > month_col_index else -float('inf')
             swing_low_pct_val = to_float(row_data[swing_low_col_index], is_percent=True) if len(row_data) > swing_low_col_index else -float('inf')
-            
+
             combined_data.append({
                 'dashboard_row': row_data,
                 'token_row': token_data[i] if i < len(token_data) else [''],
@@ -2269,7 +2288,7 @@ def sort_full_positions():
         # 6. Write the sorted data back to the sheets
         Dashboard.update(range_to_sort, sorted_dashboard_data, value_input_option='USER_ENTERED')
         ATHCache.update(token_range, sorted_token_data, value_input_option='USER_ENTERED')
-        
+
         logger.info("Successfully sorted and updated Full Positions on the Google Sheet.")
 
     except Exception as e:
@@ -2282,14 +2301,14 @@ def run_background_task_scheduler():
     """
     global subscribed_tokens, excel_dashboard_details, excel_setup_details, excel_3pct_setup_details, excel_dynamic_setups
     logger.info("Background task scheduler thread started.")
-    
+
     last_checked_minute_orh, last_checked_minute_15min, last_checked_minute_30min, last_checked_minute_1hr = None, None, None, None
     last_scan_time = 0
-    
+
     # --- MODIFIED: Timers for 24-hour tasks ---
     # Set to 0 to ensure they run on the first pass
     last_sort_time = 0
-    last_monthly_high_fetch_time = 0 
+    last_monthly_high_fetch_time = 0
 
     while True:
         try:
@@ -2297,7 +2316,7 @@ def run_background_task_scheduler():
             check_and_place_orders()
             check_and_update_order_statuses()
             # -------------------------------------
-            
+
             now = datetime.datetime.now()
             current_minute = now.minute
 
@@ -2310,7 +2329,7 @@ def run_background_task_scheduler():
                     excel_setup_details = new_orh
                     excel_3pct_setup_details = new_3pct
                     excel_dynamic_setups = new_dynamic
-                
+
                 tokens_to_subscribe = current_excel_tokens - subscribed_tokens
                 if tokens_to_subscribe and smart_ws and smart_ws._is_connected_flag:
                     subscribe_list_grouped = collections.defaultdict(list)
@@ -2329,7 +2348,7 @@ def run_background_task_scheduler():
                         smart_ws.subscribe(f"sub_{int(time.time())}", smart_ws.QUOTE, formatted_tokens)
                         subscribed_tokens.update(tokens)
                         logger.info(f"Subscribed to {len(tokens)} new tokens on exchange type {ex_type}.")
-                
+
                 last_scan_time = time.time()
 
             # --- MODIFIED: Run these tasks once every 24 hours ---
@@ -2353,7 +2372,7 @@ def run_background_task_scheduler():
             with data_lock:
                 has_3pct_symbols = bool(excel_3pct_setup_details)
                 has_dynamic_symbols = bool(excel_dynamic_setups)
-            
+
             if has_3pct_symbols or has_dynamic_symbols:
                 with data_lock:
                     all_tokens_for_history = set()
@@ -2369,7 +2388,7 @@ def run_background_task_scheduler():
                     check_and_update_breakdown_status()
                     check_and_update_dynamic_setups() # <-- NEW
                     last_checked_minute_15min = current_minute
-                
+
                 if current_minute % 30 == 1 and current_minute != last_checked_minute_30min:
                     fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_for_history, 'THIRTY_MINUTE')
                     check_and_update_price_volume_setups()
@@ -2383,7 +2402,7 @@ def run_background_task_scheduler():
                     check_and_update_breakdown_status()
                     check_and_update_dynamic_setups() # <-- NEW
                     last_checked_minute_1hr = current_minute
-            
+
             time.sleep(1)
         except Exception as e:
             logger.exception(f"Error in background scheduler thread: {e}")
@@ -2391,49 +2410,117 @@ def run_background_task_scheduler():
 
 # =====================================================================================================================
 #
-#                                         --- NEW FUNCTION TO POPULATE ATH CACHE ---
+# --- START: MODIFIED SECTION FOR DAILY ATH CACHE UPDATE ---
 #
 # =====================================================================================================================
 
 def populate_ath_cache_from_master_list(ATHCache, master_list):
     """
-    Filters the master instrument list for stocks (-EQ, -BE) and indexes,
-    and populates the ATH Cache sheet with their tokens and symbols.
-    This function runs once at startup.
+    MODIFIED: Filters the master instrument list for stocks and indexes,
+    and populates the ATH Cache sheet with their symbols (Col A) and tokens (Col T).
     """
     logger.info("Filtering master instrument list to populate ATH Cache...")
-    
-    filtered_instruments = []
+
+    symbols_to_write = []
+    tokens_to_write = []
+
     for instrument in master_list:
         symbol = instrument.get('symbol', '')
         instrument_type = instrument.get('instrumenttype', '')
-        
-        # Check if the instrument is a stock (ends with -EQ or -BE) or an index
+
         if (symbol.endswith('-EQ') or symbol.endswith('-BE') or instrument_type == 'AMXIDX'):
             token = instrument.get('token')
             if token and symbol:
-                filtered_instruments.append([token, symbol])
+                symbols_to_write.append([symbol])
+                tokens_to_write.append([token])
 
-    if not filtered_instruments:
+    if not symbols_to_write:
         logger.warning("No instruments found matching the filter criteria. ATH Cache will not be populated.")
         return
 
-    logger.info(f"Found {len(filtered_instruments)} stocks and indexes. Updating ATH Cache sheet...")
+    logger.info(f"Found {len(symbols_to_write)} stocks and indexes. Updating ATH Cache sheet...")
 
     try:
-        # Define the range to be updated. T2:U will cover all rows from 2 downwards in columns T and U.
-        update_range = 'T2:U'
-        
-        # CORRECTED: Use batch_clear for a specific range
-        ATHCache.batch_clear([update_range])
-        logger.info(f"Cleared existing data in ATH Cache range {update_range}.")
-        
-        # CORRECTED: Use named arguments to resolve the DeprecationWarning
-        ATHCache.update(range_name=update_range, values=filtered_instruments, value_input_option='USER_ENTERED')
-        logger.info(f"Successfully populated ATH Cache with {len(filtered_instruments)} instruments.")
+        # Define the ranges to be updated
+        symbol_range = 'A2:A'
+        token_range = 'T2:T'
+
+        # Clear existing data in both ranges
+        ATHCache.batch_clear([symbol_range, token_range])
+        logger.info(f"Cleared existing data in ATH Cache ranges {symbol_range} and {token_range}.")
+
+        # Update Column A with symbols
+        ATHCache.update(range_name=symbol_range, values=symbols_to_write, value_input_option='USER_ENTERED')
+        logger.info(f"Successfully populated Column A of ATH Cache with {len(symbols_to_write)} symbols.")
+
+        # Update Column T with tokens
+        ATHCache.update(range_name=token_range, values=tokens_to_write, value_input_option='USER_ENTERED')
+        logger.info(f"Successfully populated Column T of ATH Cache with {len(tokens_to_write)} tokens.")
 
     except Exception as e:
         logger.exception(f"An error occurred while updating the ATH Cache sheet: {e}")
+
+def run_daily_ath_cache_update():
+    """
+    MODIFIED: This function runs in a dedicated thread. It performs an initial update
+    immediately upon startup, then schedules subsequent updates for 9:00 AM daily.
+    """
+    logger.info("Daily ATH Cache updater thread started.")
+
+    # --- MODIFICATION: Perform the first run immediately on startup ---
+    logger.info("Performing initial, one-time ATH Cache population on startup...")
+    try:
+        # We use the globally loaded master list for the very first run
+        if instrument_master_list and ATHCache:
+            populate_ath_cache_from_master_list(ATHCache, instrument_master_list)
+    except Exception as e:
+        logger.exception(f"An error occurred during the initial ATH cache population: {e}")
+
+    # Set the last run date to today to prevent the scheduler from running again today
+    last_run_date = datetime.date.today()
+    logger.info(f"Initial ATH Cache population complete. Next scheduled run is for tomorrow at 9:00 AM.")
+
+
+    # --- This loop handles all subsequent daily runs ---
+    while True:
+        try:
+            now = datetime.datetime.now()
+            today = now.date()
+
+            # Check if it's 9:00 AM and if the task hasn't run today
+            if now.hour == 9 and now.minute == 0 and today != last_run_date:
+                logger.info(f"Scheduled time 9:00 AM reached. Starting daily ATH Cache update for {today.strftime('%Y-%m-%d')}.")
+
+                # --- Download a fresh master list for the daily update ---
+                try:
+                    logger.info(f"Downloading fresh master instrument list from {INSTRUMENT_LIST_URL}...")
+                    response = requests.get(INSTRUMENT_LIST_URL)
+                    response.raise_for_status()
+                    daily_master_list = response.json()
+                    logger.info(f"Successfully downloaded {len(daily_master_list)} instruments for daily update.")
+
+                    # --- Populate the sheet ---
+                    if daily_master_list and ATHCache:
+                        populate_ath_cache_from_master_list(ATHCache, daily_master_list)
+
+                    # Mark today's run as complete
+                    last_run_date = today
+
+                except Exception as e:
+                    logger.error(f"FATAL: Could not download or process the master instrument list for daily update: {e}.")
+
+            # Wait for 60 seconds before checking the time again
+            time.sleep(60)
+
+        except Exception as e:
+            logger.exception(f"An error occurred in the daily ATH cache updater thread: {e}")
+            time.sleep(60) # Wait before retrying in case of an unexpected error
+
+# =====================================================================================================================
+#
+# --- END: MODIFIED SECTION ---
+#
+# =====================================================================================================================
 
 
 def start_main_application():
@@ -2445,23 +2532,15 @@ def start_main_application():
 
     logger.info("Starting Combined Trading Dashboard and Signal Generator...")
 
-    # --- MODIFIED: Download instrument master list at startup ---
+    # --- MODIFIED: Download instrument master list at startup for immediate use by other functions ---
     try:
-        logger.info(f"Downloading master instrument list from {INSTRUMENT_LIST_URL}...")
+        logger.info(f"Performing initial download of master instrument list from {INSTRUMENT_LIST_URL}...")
         response = requests.get(INSTRUMENT_LIST_URL)
         response.raise_for_status()
         instrument_master_list = response.json()
-        logger.info(f"Successfully downloaded and loaded {len(instrument_master_list)} instruments.")
-        
-        # --- DIAGNOSTIC LOGGING: Print first 5 instruments ---
-        if instrument_master_list:
-            logger.info("--- Sample of first 5 instruments from master list: ---")
-            for i in range(min(5, len(instrument_master_list))):
-                logger.info(f"Record {i+1}: {instrument_master_list[i]}")
-            logger.info("----------------------------------------------------")
-
+        logger.info(f"Successfully downloaded and loaded {len(instrument_master_list)} instruments for startup.")
     except Exception as e:
-        logger.error(f"FATAL: Could not download or parse the master instrument list: {e}. Exiting.")
+        logger.error(f"FATAL: Could not download or parse the master instrument list at startup: {e}. Exiting.")
         return
 
     try:
@@ -2476,11 +2555,6 @@ def start_main_application():
     except Exception as e:
         logger.error(f"Error connecting to Google Sheets: {e}. Please check credentials and sheet names. Exiting.")
         return
-
-    # --- NEW: Populate the ATH Cache sheet from the master list ---
-    if instrument_master_list and ATHCache:
-        populate_ath_cache_from_master_list(ATHCache, instrument_master_list)
-    # -----------------------------------------------------------
 
     try:
         logger.info("Generating SmartAPI session...")
@@ -2506,14 +2580,14 @@ def start_main_application():
     excel_setup_details = new_orh
     excel_3pct_setup_details = new_3pct
     excel_dynamic_setups = new_dynamic # <-- NEW
-    
+
     # --- MODIFIED: Run these tasks once at startup ---
     logger.info("Performing initial one-time fetch for monthly highs and portfolio sort...")
     unique_tokens_3pct_startup = list(set([(token, details[0]['exchange_type']) for token, details in excel_3pct_setup_details.items() if details]))
     if unique_tokens_3pct_startup:
         fetch_monthly_highs(smart_api_obj, unique_tokens_3pct_startup)
     sort_full_positions()
-    
+
     try:
         logger.info("Initializing SmartAPI WebSocket...")
         smart_ws = MyWebSocketClient(auth_token, API_KEY, CLIENT_CODE, feed_token)
@@ -2547,7 +2621,11 @@ def start_main_application():
             logger.info(f"Subscribed to {len(tokens)} new tokens on exchange type {ex_type}.")
 
     logger.info("Starting concurrent application threads...")
-    
+
+    # --- ADDED: Start the new daily scheduler for the ATH Cache ---
+    ath_cache_updater_thread = threading.Thread(target=run_daily_ath_cache_update, daemon=True)
+    ath_cache_updater_thread.start()
+
     dashboard_updater_thread = threading.Thread(target=run_live_dashboard_updater, daemon=True)
     dashboard_updater_thread.start()
 
@@ -2559,9 +2637,9 @@ def start_main_application():
 
     background_scheduler_thread = threading.Thread(target=run_background_task_scheduler, daemon=True)
     background_scheduler_thread.start()
-    
+
     logger.info("All systems are go! The application is now running.")
-    
+
     try:
         while True:
             time.sleep(60)
