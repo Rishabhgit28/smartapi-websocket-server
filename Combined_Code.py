@@ -105,7 +105,7 @@ ATH_CACHE_SHEET_NAME = 'ATH Cache'
 ORDERS_SHEET_NAME = 'Orders'
 
 # --- Apps Script Web App URL for Instant Triggers ---
-APPS_SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycby81OHObXThiHoXFTRYl4UVKgjS0i9mWNf83tdO9twGXX9apaTw1sVv39c9sT99nZgS/exec" # <-- PASTE YOUR URL HERE
+APPS_SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz_fhouljmK5Ad1q9wOfG0JjvJhZVAcAUupH8mmowbcUlMDG0wMP6h9XSfBsmihYvYh/exec" # <-- PASTE YOUR URL HERE
 
 # --- MODIFIED: Instrument master list URL and global variable ---
 INSTRUMENT_LIST_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
@@ -1074,7 +1074,8 @@ def check_and_update_price_volume_setups():
 
             triggered_3pct_candles = [c for c in candle_history if c.get('high', 0) > 0 and (c['high'] - c['close']) / c['high'] >= 0.03]
             if triggered_3pct_candles:
-                three_pct_down_candles[interval_api] = min(triggered_3pct_candles, key=lambda c: c['low'])
+                # Prioritize the most recent candle, not the one with the lowest price.
+                three_pct_down_candles[interval_api] = triggered_3pct_candles[-1]
 
             if any(c.get('volume', 0) > 0 for c in candle_history):
                 high_vol_candles[interval_api] = max(candle_history, key=lambda c: c.get('volume', 0))
@@ -1523,7 +1524,7 @@ def check_and_update_breakdown_status():
 
     try:
         all_cols = [s['result_col'] for s in setups_to_check] + [s['status_col'] for s in setups_to_check]
-        all_cols.extend([SUGGESTION_COL, FULL_QTY_COL]) # Add suggestion and quantity columns
+        all_cols.extend([SUGGESTION_COL, FULL_QTY_COL, FULL_POSITIONS_END_COL]) # Add suggestion, qty, and timestamp columns
         start_col = min(all_cols, key=col_to_num)
         end_col = max(all_cols, key=col_to_num)
 
@@ -1615,12 +1616,11 @@ def check_and_update_breakdown_status():
                 except (ValueError, TypeError):
                     new_suggestion = f"Exit 100% at {exit_at_price:.2f} (QTY_ERR)"
 
+
             if not exit_100_triggered:
                 breakdown_columns_count = sum(1 for status in [status_aa, status_ac, status_ae] if "Breakdown" in status)
 
-                # --- START: MODIFIED LOGIC ---
                 if breakdown_columns_count >= 2:
-                # --- END: MODIFIED LOGIC ---
                     breakdown_closes = []
                     if "Breakdown" in status_aa: breakdown_closes.extend([d['close'] for d in breakdown_details[HIGHEST_UP_CANDLE_STATUS_COL]])
                     if "Breakdown" in status_ac: breakdown_closes.extend([d['close'] for d in breakdown_details[HIGH_VOL_STATUS_COL]])
@@ -1647,9 +1647,21 @@ def check_and_update_breakdown_status():
                     except (ValueError, TypeError):
                         new_suggestion = f"Exit 50% at {exit_at_price:.2f} (QTY_ERR) & Trail to {trail_to_price:.2f}"
 
-            # --- MODIFIED LOGIC FOR TRIGGERING ALERTS ---
             suggestion_col_idx = col_to_num(SUGGESTION_COL) - col_to_num(start_col)
             current_suggestion_on_sheet = sheet_data[row_idx][suggestion_col_idx] if len(sheet_data[row_idx]) > suggestion_col_idx else ""
+
+            # --- START: MODIFIED SECTION ---
+            # Only update the sheet if the suggestion text has actually changed
+            if new_suggestion.strip() != current_suggestion_on_sheet.strip():
+                 value_updates.append({"range": f"{SUGGESTION_COL}{row}", "values": [[new_suggestion]]})
+                 
+                 # Also update the timestamp in column AG
+                 timestamp_to_write = ""
+                 if new_suggestion.strip():
+                     timestamp_to_write = datetime.datetime.now().strftime("%d %B, %I:%M %p")
+                 
+                 value_updates.append({"range": f"{FULL_POSITIONS_END_COL}{row}", "values": [[timestamp_to_write]]})
+            # --- END: MODIFIED SECTION ---
 
             # Helper function to get the core instruction type ("100%", "50%", or "Blank")
             def get_suggestion_type(suggestion_str):
@@ -1661,10 +1673,6 @@ def check_and_update_breakdown_status():
 
             current_suggestion_type = get_suggestion_type(current_suggestion_on_sheet)
             new_suggestion_type = get_suggestion_type(new_suggestion)
-
-            # Only update the sheet if the text is different
-            if new_suggestion.strip() != current_suggestion_on_sheet.strip():
-                 value_updates.append({"range": f"{SUGGESTION_COL}{row}", "values": [[new_suggestion]]})
 
             # Only send a trigger if the *type* of instruction has changed
             if new_suggestion_type != current_suggestion_type:
