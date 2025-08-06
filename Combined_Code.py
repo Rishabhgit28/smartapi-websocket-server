@@ -1661,17 +1661,6 @@ def check_and_update_breakdown_status():
             suggestion_col_idx = col_to_num(SUGGESTION_COL) - col_to_num(start_col)
             current_suggestion_on_sheet = sheet_data[row_idx][suggestion_col_idx] if len(sheet_data[row_idx]) > suggestion_col_idx else ""
 
-            # Only update the sheet if the suggestion text has actually changed
-            if new_suggestion.strip() != current_suggestion_on_sheet.strip():
-                 value_updates.append({"range": f"{SUGGESTION_COL}{row}", "values": [[new_suggestion]]})
-
-                 # Also update the timestamp in column AG
-                 timestamp_to_write = ""
-                 if new_suggestion.strip():
-                     timestamp_to_write = get_ist_time().strftime("%d %B, %I:%M %p")
-
-                 value_updates.append({"range": f"{FULL_POSITIONS_END_COL}{row}", "values": [[timestamp_to_write]]})
-
             # Helper function to get the core instruction type ("100%", "50%", or "Blank")
             def get_suggestion_type(suggestion_str):
                 if "100%" in suggestion_str:
@@ -1683,14 +1672,27 @@ def check_and_update_breakdown_status():
             current_suggestion_type = get_suggestion_type(current_suggestion_on_sheet)
             new_suggestion_type = get_suggestion_type(new_suggestion)
 
-            # Only send a trigger if the *type* of instruction has changed
+            # Only update the suggestion text if it's different
+            if new_suggestion.strip() != current_suggestion_on_sheet.strip():
+                 value_updates.append({"range": f"{SUGGESTION_COL}{row}", "values": [[new_suggestion]]})
+
+            # --- START: MODIFIED SECTION ---
+            # Only update the timestamp and send alert if the *type* of instruction has changed
             if new_suggestion_type != current_suggestion_type:
                 logger.info(f"Suggestion TYPE CHANGE DETECTED for {entry['symbol']} at row {row}: from '{current_suggestion_type}' to '{new_suggestion_type}'")
 
+                # Update the timestamp in column AG
+                timestamp_to_write = ""
+                if new_suggestion.strip():
+                    timestamp_to_write = get_ist_time().strftime("%d %B, %I:%M %p")
+                value_updates.append({"range": f"{FULL_POSITIONS_END_COL}{row}", "values": [[timestamp_to_write]]})
+
+                # Send the alert
                 if new_suggestion.strip(): # Only send trigger if there's a new suggestion
                     logger.info(f"Sending 'position_closed' trigger for row {row}.")
                     trigger_apps_script_alert("position_closed", row, entry['symbol'], entry['exchange'])
                     time.sleep(2) # Add a 2-second delay to pace the requests
+            # --- END: MODIFIED SECTION ---
 
 
     if value_updates:
