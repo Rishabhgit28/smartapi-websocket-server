@@ -19,6 +19,10 @@ import datetime
 import re
 from datetime import timedelta
 from dateutil.relativedelta import relativedelta
+# --- START: MODIFIED SECTION ---
+from zoneinfo import ZoneInfo
+# --- END: MODIFIED SECTION ---
+
 
 # --- Flask for Web Service Deployment ---
 from flask import Flask
@@ -244,6 +248,12 @@ ORH_MAX_ROW = 17
 #
 # =====================================================================================================================
 
+# --- START: MODIFIED SECTION ---
+def get_ist_time():
+    """Returns the current time in Indian Standard Time."""
+    return datetime.datetime.now(ZoneInfo("Asia/Kolkata"))
+# --- END: MODIFIED SECTION ---
+
 def normalize_status(api_status):
     """
     Maps raw API status strings to a user-friendly, unified format, as per the research document.
@@ -392,7 +402,7 @@ def save_previous_day_high_cache():
 
 def is_market_hours():
     """Checks if the current time is within Indian market hours (Mon-Fri, 9:15 AM - 3:30 PM IST)."""
-    now = datetime.datetime.now()
+    now = get_ist_time()
     return (0 <= now.weekday() <= 4) and (datetime.time(9, 15) <= now.time() <= datetime.time(15, 30))
 
 def col_to_num(letter):
@@ -644,7 +654,7 @@ class MyWebSocketClient(SmartWebSocketV2):
                 is_orh_token = token in excel_setup_details
 
             if is_orh_token:
-                current_time = datetime.datetime.now()
+                current_time = get_ist_time()
                 interval = '3min'
                 candle_info = interval_ohlc_data[token][interval]
 
@@ -685,8 +695,9 @@ def fetch_initial_candle_data(smart_api_obj, symbols_to_fetch):
     """Fetches historical 3-min candle data for today to pre-populate candles for ORH setup."""
     logger.info("Fetching initial historical 3-min candle data for today (ORH setup)...")
 
-    from_date = datetime.datetime.now().replace(hour=9, minute=15, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
-    to_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    now_ist = get_ist_time()
+    from_date = now_ist.replace(hour=9, minute=15, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
+    to_date = now_ist.strftime("%Y-%m-%d %H:%M")
     MAX_RETRIES, RETRY_DELAY_SECONDS = 5, 20
 
     with data_lock:
@@ -766,7 +777,7 @@ def fetch_historical_candles_for_3pct_down(smart_api_obj, tokens_to_fetch, inter
     """
     Fetches historical data for price/volume setups from the previous week's Monday to now.
     """
-    today = datetime.datetime.now()
+    today = get_ist_time()
     if today.weekday() == 5: # If Saturday
         to_dt = today - timedelta(days=1)
     elif today.weekday() == 6: # If Sunday
@@ -967,7 +978,7 @@ def check_and_update_orh_setup():
                     trigger_price = round(high * 1.005, 2)
 
                     new_order_row = [
-                        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        get_ist_time().strftime("%Y-%m-%d %H:%M:%S"),
                         symbol,
                         exchange,
                         "BUY",
@@ -1650,18 +1661,16 @@ def check_and_update_breakdown_status():
             suggestion_col_idx = col_to_num(SUGGESTION_COL) - col_to_num(start_col)
             current_suggestion_on_sheet = sheet_data[row_idx][suggestion_col_idx] if len(sheet_data[row_idx]) > suggestion_col_idx else ""
 
-            # --- START: MODIFIED SECTION ---
             # Only update the sheet if the suggestion text has actually changed
             if new_suggestion.strip() != current_suggestion_on_sheet.strip():
                  value_updates.append({"range": f"{SUGGESTION_COL}{row}", "values": [[new_suggestion]]})
-                 
+
                  # Also update the timestamp in column AG
                  timestamp_to_write = ""
                  if new_suggestion.strip():
-                     timestamp_to_write = datetime.datetime.now().strftime("%d %B, %I:%M %p")
-                 
+                     timestamp_to_write = get_ist_time().strftime("%d %B, %I:%M %p")
+
                  value_updates.append({"range": f"{FULL_POSITIONS_END_COL}{row}", "values": [[timestamp_to_write]]})
-            # --- END: MODIFIED SECTION ---
 
             # Helper function to get the core instruction type ("100%", "50%", or "Blank")
             def get_suggestion_type(suggestion_str):
@@ -2105,8 +2114,11 @@ def update_excel_live_data():
 
                 days_duration = ""
                 if entry_date_str:
-                    try: days_duration = f"{(datetime.datetime.now() - datetime.datetime.strptime(entry_date_str, '%d-%b-%y')).days} Days"
-                    except ValueError: days_duration = "Invalid Date"
+                    try:
+                        entry_dt = datetime.datetime.strptime(entry_date_str, '%d-%b-%y')
+                        days_duration = f"{(get_ist_time().date() - entry_dt.date()).days} Days"
+                    except ValueError:
+                        days_duration = "Invalid Date"
                 queue_update(details.get('days_duration_col'), days_duration, "@")
 
     if requests:
@@ -2325,7 +2337,7 @@ def run_background_task_scheduler():
             check_and_update_order_statuses()
             # -------------------------------------
 
-            now = datetime.datetime.now()
+            now = get_ist_time()
             current_minute = now.minute
 
             # Rescan for symbol changes every 15 seconds
@@ -2485,14 +2497,14 @@ def run_daily_ath_cache_update():
         logger.exception(f"An error occurred during the initial ATH cache population: {e}")
 
     # Set the last run date to today to prevent the scheduler from running again today
-    last_run_date = datetime.date.today()
+    last_run_date = get_ist_time().date()
     logger.info(f"Initial ATH Cache population complete. Next scheduled run is for tomorrow at 9:00 AM.")
 
 
     # --- This loop handles all subsequent daily runs ---
     while True:
         try:
-            now = datetime.datetime.now()
+            now = get_ist_time()
             today = now.date()
 
             # Check if it's 9:00 AM and if the task hasn't run today
