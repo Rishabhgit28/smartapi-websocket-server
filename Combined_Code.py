@@ -2439,7 +2439,7 @@ def run_background_task_scheduler():
 def populate_ath_cache_from_master_list(ATHCache, master_list):
     """
     MODIFIED: Filters the master instrument list for stocks and indexes,
-    and populates the ATH Cache sheet with their symbols (Col A) and tokens (Col T).
+    and populates the ATH Cache sheet with their symbols (Col A) and tokens (Col W).
     """
     logger.info("Filtering master instrument list to populate ATH Cache...")
 
@@ -2465,7 +2465,8 @@ def populate_ath_cache_from_master_list(ATHCache, master_list):
     try:
         # Define the ranges to be updated
         symbol_range = 'A2:A'
-        token_range = 'T2:T'
+        # --- THIS IS THE MODIFIED LINE ---
+        token_range = 'W2:W' # Changed from 'T2:T' to 'W2:W'
 
         # Clear existing data in both ranges
         ATHCache.batch_clear([symbol_range, token_range])
@@ -2475,9 +2476,9 @@ def populate_ath_cache_from_master_list(ATHCache, master_list):
         ATHCache.update(range_name=symbol_range, values=symbols_to_write, value_input_option='USER_ENTERED')
         logger.info(f"Successfully populated Column A of ATH Cache with {len(symbols_to_write)} symbols.")
 
-        # Update Column T with tokens
+        # Update Column W with tokens
         ATHCache.update(range_name=token_range, values=tokens_to_write, value_input_option='USER_ENTERED')
-        logger.info(f"Successfully populated Column T of ATH Cache with {len(tokens_to_write)} tokens.")
+        logger.info(f"Successfully populated Column W of ATH Cache with {len(tokens_to_write)} tokens.")
 
     except Exception as e:
         logger.exception(f"An error occurred while updating the ATH Cache sheet: {e}")
