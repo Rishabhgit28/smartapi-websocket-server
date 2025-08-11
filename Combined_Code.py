@@ -187,10 +187,8 @@ FOCUS_EXCHANGE_COL = 'B'
 FOCUS_SYMBOL_COL = 'C'
 FOCUS_LTP_COL = 'D'
 FOCUS_CHG_COL = 'E'
-# --- START: MODIFIED SECTION ---
-ATH_CACHE_Y_COL_DASH = 'AG' # Changed from 'Y'
-ATH_CACHE_Z_COL_DASH = 'AH' # Changed from 'Z'
-# --- END: MODIFIED SECTION ---
+ATH_CACHE_Y_COL_DASH = 'AG'
+ATH_CACHE_Z_COL_DASH = 'AH'
 FULL_EXCHANGE_COL = 'L'
 FULL_SYMBOL_COL = 'M'
 FULL_QTY_COL = 'N'
@@ -2439,49 +2437,62 @@ def run_background_task_scheduler():
 def populate_ath_cache_from_master_list(ATHCache, master_list):
     """
     MODIFIED: Filters the master instrument list for stocks and indexes,
-    and populates the ATH Cache sheet with their symbols (Col A) and tokens (Col AF).
+    and appends only new symbols and tokens to the ATH Cache sheet.
     """
-    logger.info("Filtering master instrument list to populate ATH Cache...")
-
-    symbols_to_write = []
-    tokens_to_write = []
-
-    for instrument in master_list:
-        symbol = instrument.get('symbol', '')
-        instrument_type = instrument.get('instrumenttype', '')
-
-        if (symbol.endswith('-EQ') or symbol.endswith('-BE') or instrument_type == 'AMXIDX'):
-            token = instrument.get('token')
-            if token and symbol:
-                symbols_to_write.append([symbol])
-                tokens_to_write.append([token])
-
-    if not symbols_to_write:
-        logger.warning("No instruments found matching the filter criteria. ATH Cache will not be populated.")
-        return
-
-    logger.info(f"Found {len(symbols_to_write)} stocks and indexes. Updating ATH Cache sheet...")
+    logger.info("Checking for new instruments to append to ATH Cache...")
 
     try:
-        # Define the ranges to be updated
-        symbol_range = 'A2:A'
-        # --- THIS IS THE MODIFIED LINE ---
-        token_range = 'AF2:AF' # Changed from 'W2:W'
+        # 1. Get all existing symbols from the sheet to avoid duplicates.
+        # We use a set for efficient checking.
+        existing_symbols_list = ATHCache.col_values(1) # col_values(1) is Column A
+        existing_symbols = set(existing_symbols_list[1:]) # Skip header row
 
-        # Clear existing data in both ranges
-        ATHCache.batch_clear([symbol_range, token_range])
-        logger.info(f"Cleared existing data in ATH Cache ranges {symbol_range} and {token_range}.")
+        logger.info(f"Found {len(existing_symbols)} existing symbols in the ATH Cache.")
 
-        # Update Column A with symbols
-        ATHCache.update(range_name=symbol_range, values=symbols_to_write, value_input_option='USER_ENTERED')
-        logger.info(f"Successfully populated Column A of ATH Cache with {len(symbols_to_write)} symbols.")
+        new_symbols_to_append = []
+        new_tokens_to_append = []
 
-        # Update Column AF with tokens
-        ATHCache.update(range_name=token_range, values=tokens_to_write, value_input_option='USER_ENTERED')
-        logger.info(f"Successfully populated Column AF of ATH Cache with {len(tokens_to_write)} tokens.")
+        # 2. Filter the master list to find only new instruments.
+        for instrument in master_list:
+            symbol = instrument.get('symbol', '')
+            instrument_type = instrument.get('instrumenttype', '')
+
+            # Check if the symbol is new and fits our criteria (stock or index)
+            if symbol and symbol not in existing_symbols:
+                if (symbol.endswith('-EQ') or symbol.endswith('-BE') or instrument_type == 'AMXIDX'):
+                    token = instrument.get('token')
+                    if token:
+                        new_symbols_to_append.append([symbol])
+                        new_tokens_to_append.append([token])
+                        existing_symbols.add(symbol) # Add to set to avoid duplicates within the same run
+
+        # 3. If new instruments are found, append them to the sheet.
+        if new_symbols_to_append:
+            logger.info(f"Found {len(new_symbols_to_append)} new instruments to add. Appending to the sheet...")
+
+            # Find the first empty row to start appending data
+            start_row = len(existing_symbols_list) + 1
+
+            # Prepare batch update request to append new symbols and tokens
+            updates = [
+                {
+                    'range': f'A{start_row}',
+                    'values': new_symbols_to_append
+                },
+                {
+                    'range': f'AF{start_row}',
+                    'values': new_tokens_to_append
+                }
+            ]
+
+            ATHCache.batch_update(updates, value_input_option='USER_ENTERED')
+            logger.info(f"Successfully appended {len(new_symbols_to_append)} new symbols and tokens to the ATH Cache sheet.")
+        else:
+            logger.info("No new instruments found. ATH Cache is already up-to-date.")
 
     except Exception as e:
         logger.exception(f"An error occurred while updating the ATH Cache sheet: {e}")
+
 
 def run_daily_ath_cache_update():
     """
