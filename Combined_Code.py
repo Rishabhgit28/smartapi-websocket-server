@@ -109,7 +109,7 @@ ATH_CACHE_SHEET_NAME = 'ATH Cache'
 ORDERS_SHEET_NAME = 'Orders'
 
 # --- Apps Script Web App URL for Instant Triggers ---
-APPS_SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz_fhouljmK5Ad1q9wOfG0JjvJhZVAcAUupH8mmowbcUlMDG0wMP6h9XSfBsmihYvYh/exec" # <-- PASTE YOUR URL HERE
+APPS_SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyYbglyVYUk_PiqHiTdCfThsjfvHic-sXTcXzczaezh86k1F0U1AHz89VG_AaoAmCKw/exec" # <-- PASTE YOUR URL HERE
 
 # --- MODIFIED: Instrument master list URL and global variable ---
 INSTRUMENT_LIST_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
