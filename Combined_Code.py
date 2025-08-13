@@ -2444,8 +2444,10 @@ def populate_ath_cache_from_master_list(ATHCache, master_list):
     try:
         # 1. Get all existing symbols from the sheet to avoid duplicates.
         # We use a set for efficient checking.
-        existing_symbols_list = ATHCache.col_values(1) # col_values(1) is Column A
-        existing_symbols = set(existing_symbols_list[1:]) # Skip header row
+        # --- MODIFIED: Read from column AC ---
+        existing_symbols_list = ATHCache.col_values(col_to_num('AC'))
+        # --- MODIFIED: Skip first two rows for headers ---
+        existing_symbols = set(existing_symbols_list[2:])
 
         logger.info(f"Found {len(existing_symbols)} existing symbols in the ATH Cache.")
 
@@ -2476,7 +2478,8 @@ def populate_ath_cache_from_master_list(ATHCache, master_list):
             # Prepare batch update request to append new symbols and tokens
             updates = [
                 {
-                    'range': f'A{start_row}',
+                    # --- MODIFIED: Write to column AC ---
+                    'range': f'AC{start_row}',
                     'values': new_symbols_to_append
                 },
                 {
