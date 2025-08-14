@@ -187,8 +187,10 @@ FOCUS_EXCHANGE_COL = 'B'
 FOCUS_SYMBOL_COL = 'C'
 FOCUS_LTP_COL = 'D'
 FOCUS_CHG_COL = 'E'
-ATH_CACHE_Y_COL_DASH = 'AG'
-ATH_CACHE_Z_COL_DASH = 'AH'
+# --- START: MODIFIED SECTION ---
+ATH_CACHE_Y_COL_DASH = 'AM' # Changed from 'AG'
+ATH_CACHE_Z_COL_DASH = 'AN' # Changed from 'AH'
+# --- END: MODIFIED SECTION ---
 FULL_EXCHANGE_COL = 'L'
 FULL_SYMBOL_COL = 'M'
 FULL_QTY_COL = 'N'
@@ -2444,8 +2446,11 @@ def populate_ath_cache_from_master_list(ATHCache, master_list):
     try:
         # 1. Get all existing symbols from the sheet to avoid duplicates.
         # We use a set for efficient checking.
-        # --- MODIFIED: Read from column AC ---
-        existing_symbols_list = ATHCache.col_values(col_to_num('AC'))
+        # --- START: MODIFIED SECTION ---
+        # Read from column AI instead of AC
+        existing_symbols_list = ATHCache.col_values(col_to_num('AI'))
+        # --- END: MODIFIED SECTION ---
+
         # --- MODIFIED: Skip first two rows for headers ---
         existing_symbols = set(existing_symbols_list[2:])
 
@@ -2475,18 +2480,21 @@ def populate_ath_cache_from_master_list(ATHCache, master_list):
             # Find the first empty row to start appending data
             start_row = len(existing_symbols_list) + 1
 
-            # Prepare batch update request to append new symbols and tokens
+            # --- START: MODIFIED SECTION ---
+            # Prepare batch update request to append new symbols and tokens to the new columns
             updates = [
                 {
-                    # --- MODIFIED: Write to column AC ---
-                    'range': f'AC{start_row}',
+                    # Write to column AI instead of AC
+                    'range': f'AI{start_row}',
                     'values': new_symbols_to_append
                 },
                 {
-                    'range': f'AF{start_row}',
+                    # Write to column AL instead of AF
+                    'range': f'AL{start_row}',
                     'values': new_tokens_to_append
                 }
             ]
+            # --- END: MODIFIED SECTION ---
 
             ATHCache.batch_update(updates, value_input_option='USER_ENTERED')
             logger.info(f"Successfully appended {len(new_symbols_to_append)} new symbols and tokens to the ATH Cache sheet.")
