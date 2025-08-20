@@ -1,7 +1,7 @@
 # =====================================================================================================================
 # Combined Trading Dashboard and Signal Generator
 # Merges the functionality of smartWebSocketV2.py (live dashboard) and ORH.py (trade signal detection).
-# This single script provides real-time P&L tracking and simultaneously monitors for ORH and 3% Down setups.
+# This single script provides real-time P&L tracking and simultaneously monitors for ORH, ORL, and 3% Down setups.
 # VERSION: Concurrent (Threaded) with Advanced Order Status Tracking and Dynamic Setups
 # =====================================================================================================================
 
@@ -43,7 +43,7 @@ try:
 except ImportError:
     # Handle the case where winsound is not available (e.g., on non-Windows systems)
     winsound = None
-    logger.warning("Could not import 'winsound'. Sound alerts for ORH setup will be disabled.")
+    logger.warning("Could not import 'winsound'. Sound alerts for ORH/ORL setups will be disabled.")
 
 # --- SmartAPI Imports ---
 from SmartApi import SmartConnect
@@ -109,7 +109,7 @@ ATH_CACHE_SHEET_NAME = 'ATH Cache'
 ORDERS_SHEET_NAME = 'Orders'
 
 # --- Apps Script Web App URL for Instant Triggers ---
-APPS_SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyFjywA1Xv9b2Rxq7DLS8e9yaTNoUAvS4yIuxTwbhn1j7pXHvzcPllwr71lRi0lj3eB/exec" # <-- PASTE YOUR URL HERE
+APPS_SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbw6FiVcKTWoeaQpZzicQjw_tpXf8dUGdaaA3hq6pZ0sFGjMkGwOVabEDgWbLaf3jwNj/exec" # <-- PASTE YOUR URL HERE
 
 # --- MODIFIED: Instrument master list URL and global variable ---
 INSTRUMENT_LIST_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
@@ -142,6 +142,7 @@ OrdersSheet = None
 
 # --- Threading Lock for Data Safety ---
 data_lock = threading.Lock()
+initial_data_ready = threading.Event() # <-- NEW: Event to signal when initial data is fetched
 
 # --- Data Caching and State Management Variables ---
 # For Live Dashboard
@@ -152,14 +153,17 @@ previous_ltp_data = {}
 previous_percentage_change_data = {}
 cells_to_clear_color = set()
 
-# For ORH and 3% Down Setups
-excel_setup_details = collections.defaultdict(list)
+# For ORH, ORL and 3% Down Setups
+excel_orh_setup_details = collections.defaultdict(list) # MODIFIED: Renamed from excel_setup_details
+excel_orl_setup_details = collections.defaultdict(list) # NEW: For ORL setup
 excel_3pct_setup_details = collections.defaultdict(list)
 excel_dynamic_setups = collections.defaultdict(list) # <-- NEW: For dynamic setups
 interval_ohlc_data = collections.defaultdict(lambda: collections.defaultdict(dict))
 completed_3min_candles = collections.defaultdict(list)
+completed_5min_candles = collections.defaultdict(list) # NEW: For ORL setup
 volume_history_3pct = collections.defaultdict(lambda: collections.defaultdict(list))
 previous_day_high_cache = {}
+previous_day_low_cache = {} # NEW: For ORL setup
 monthly_high_cache = {}
 
 # For Subscription Management
@@ -171,6 +175,7 @@ scan_memory_cache = {} # <-- FIX: In-memory cache to prevent repetitive logging
 START_ROW_DATA = 5
 EXCEL_RETRY_ATTEMPTS = 3
 PREV_DAY_HIGH_CACHE_FILE = 'previous_day_high_cache.json'
+PREV_DAY_LOW_CACHE_FILE = 'previous_day_low_cache.json' # NEW: For ORL setup
 TEST_3PCT_DOWN_HISTORICAL_FETCH = False
 SCRIP_SEARCH_RETRY_ATTEMPTS = 5
 SCRIP_SEARCH_RETRY_DELAY = 2.0
@@ -204,15 +209,19 @@ FULL_DAYS_DURATION_COL = 'T'
 MONTH_SORT_COL = 'V'
 SWING_LOW_INPUT_COL = 'W'
 PERCENT_FROM_SWING_LOW_COL = 'X'
+TRAILING_STOP_INPUT_COL = 'Y' # NEW
+TRAILING_STOP_STATUS_COL = 'AA' # NEW
 
-HIGHEST_UP_CANDLE_COL = 'Z'
-HIGHEST_UP_CANDLE_STATUS_COL = 'AA'
-HIGH_VOL_RESULT_COL = 'AB'
-HIGH_VOL_STATUS_COL = 'AC'
-PCT_DOWN_RESULT_COL = 'AD'
-PCT_DOWN_STATUS_COL = 'AE'
-SUGGESTION_COL = 'AF'
-FULL_POSITIONS_END_COL = 'AG'
+# --- START: MODIFIED SECTION (Column Interchange) ---
+HIGHEST_UP_CANDLE_COL = 'AB'
+HIGHEST_UP_CANDLE_STATUS_COL = 'AC'
+HIGH_VOL_RESULT_COL = 'AD'
+HIGH_VOL_STATUS_COL = 'AE'
+PCT_DOWN_RESULT_COL = 'AF'
+PCT_DOWN_STATUS_COL = 'AG'
+SUGGESTION_COL = 'AH'
+FULL_POSITIONS_END_COL = 'AI'
+# --- END: MODIFIED SECTION ---
 
 INDEX_EXCHANGE_COL = 'B'
 INDEX_SYMBOL_COL = 'C'
@@ -223,13 +232,14 @@ QUARTER_SYMBOL_COL = 'N'
 QUARTER_LTP_COL = 'P'
 QUARTER_CHG_COL = 'Q'
 
-# For ORH and 3% Down Setups
-ORH_EXCHANGE_COL = 'B'
-ORH_SYMBOL_COL = 'C'
-ORH_QTY_COL = 'I'
-ORH_TOKEN_COL = 'Y'
-ORH_RESULT_COL = 'G'
-ORH_BUY_STOP_COL = 'H'
+# For ORH, ORL and 3% Down Setups
+SETUP_EXCHANGE_COL = 'B' # Shared column for ORH/ORL
+SETUP_SYMBOL_COL = 'C'   # Shared column for ORH/ORL
+SETUP_QTY_COL = 'I'      # Shared column for ORH/ORL
+SETUP_TOKEN_COL = 'Y'    # Shared column for ORH/ORL
+SETUP_RESULT_COL = 'G'   # Shared column for ORH/ORL
+SETUP_STOP_COL = 'H'     # Shared column for ORH/ORL
+
 PCT_EXCHANGE_COL_3PCT = 'L'
 PCT_SYMBOL_COL_3PCT = 'M'
 PCT_TOKEN_COL_3PCT = 'Z'
@@ -241,8 +251,7 @@ CANDLE_INTERVAL_MAP_DISPLAY = {
     'ONE_HOUR': '60 min'
 }
 
-ORH_MAX_CANDLES = 5
-ORH_MAX_ROW = 17
+SETUP_MAX_ROW = 17 # Shared max row for both ORH and ORL setups
 
 # =====================================================================================================================
 #
@@ -399,6 +408,36 @@ def save_previous_day_high_cache():
         logger.info(f"Saved previous day high cache to {cache_path}.")
     except Exception as e:
         logger.error(f"Error saving cache file {cache_path}: {e}")
+
+# --- START: NEW ORL FUNCTIONS ---
+def load_previous_day_low_cache():
+    """Loads the previous day's low data from a JSON cache file for the ORL setup."""
+    global previous_day_low_cache
+    cache_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+    cache_path = os.path.join(cache_dir, PREV_DAY_LOW_CACHE_FILE)
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'r') as f:
+                previous_day_low_cache = json.load(f)
+            logger.info(f"Loaded previous day low cache from {cache_path}.")
+        except Exception as e:
+            logger.error(f"Error loading low cache file {cache_path}: {e}. Starting with empty cache.")
+            previous_day_low_cache = {}
+    else:
+        logger.info("Previous day low cache file not found. Starting with empty cache.")
+        previous_day_low_cache = {}
+
+def save_previous_day_low_cache():
+    """Saves the previous day's low data to a JSON cache file."""
+    cache_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+    cache_path = os.path.join(cache_dir, PREV_DAY_LOW_CACHE_FILE)
+    try:
+        with open(cache_path, 'w') as f:
+            json.dump(previous_day_low_cache, f, indent=4)
+        logger.info(f"Saved previous day low cache to {cache_path}.")
+    except Exception as e:
+        logger.error(f"Error saving low cache file {cache_path}: {e}")
+# --- END: NEW ORL FUNCTIONS ---
 
 def is_market_hours():
     """Checks if the current time is within Indian market hours (Mon-Fri, 9:15 AM - 3:30 PM IST)."""
@@ -618,7 +657,7 @@ class SmartWebSocketV2(object):
 
 class MyWebSocketClient(SmartWebSocketV2):
     """
-    Custom WebSocket client that implements the combined logic for both the dashboard and the signal setups.
+    Custom WebSocket client that implements the combined logic for the dashboard and all signal setups.
     """
     def on_open(self, wsapp):
         logger.info("WebSocket connection opened.")
@@ -634,8 +673,8 @@ class MyWebSocketClient(SmartWebSocketV2):
 
     def on_data(self, wsapp, data):
         """
-        This is the unified data handler. It processes each incoming tick for both the
-        live dashboard and the 3-minute candle construction for the ORH setup.
+        This is the unified data handler. It processes each incoming tick for the live dashboard
+        and constructs candles for the ORH (3-min) and ORL (5-min) setups.
         """
         token = data.get('token')
         ltp_raw = data.get('last_traded_price')
@@ -645,53 +684,63 @@ class MyWebSocketClient(SmartWebSocketV2):
 
         if token and ltp_scaled is not None:
             # --- Logic for Live Dashboard (applies to all tokens) ---
-            # We only need the LTP from the websocket now.
             latest_tick_data[token]['ltp'] = ltp_scaled
 
-            # --- Logic for ORH Setup (applies ONLY to ORH tokens) ---
-            # To make this thread-safe, we check if the token is in a local copy of the setup details.
+            current_time = get_ist_time()
+
+            # --- Logic for ORH Setup (3-min candles) ---
             with data_lock:
-                is_orh_token = token in excel_setup_details
+                is_orh_token = token in excel_orh_setup_details
 
             if is_orh_token:
-                current_time = get_ist_time()
-                interval = '3min'
-                candle_info = interval_ohlc_data[token][interval]
+                self._process_candle(token, ltp_scaled, current_time, 3, completed_3min_candles)
 
-                minute_floor = (current_time.minute // 3) * 3
-                candle_start_dt = current_time.replace(minute=minute_floor, second=0, microsecond=0)
+            # --- Logic for ORL Setup (5-min candles) ---
+            with data_lock:
+                is_orl_token = token in excel_orl_setup_details
 
-                # Check if a new 3-minute candle needs to be started
-                if candle_info.get('start_time') is None or candle_start_dt > candle_info['start_time']:
-                    if candle_info.get('start_time') is not None:
-                        # Finalize and store the completed candle
-                        completed_candle = {
-                            'open': candle_info['open'], 'high': candle_info['high'], 'low': candle_info['low'],
-                            'close': candle_info['last_ltp'], 'start_time': candle_info['start_time']
-                        }
-                        completed_3min_candles[token].append(completed_candle)
+            if is_orl_token:
+                self._process_candle(token, ltp_scaled, current_time, 5, completed_5min_candles)
 
-                        # MODIFIED: Use ORH_MAX_CANDLES
-                        if len(completed_3min_candles[token]) > ORH_MAX_CANDLES:
-                            completed_3min_candles[token].pop(0)
+    def _process_candle(self, token, ltp, current_time, interval_minutes, completed_candle_storage):
+        """Helper function to process a candle of a specific interval."""
+        interval_key = f'{interval_minutes}min'
+        candle_info = interval_ohlc_data[token][interval_key]
 
-                        logger.info(f"Completed 3min candle for {token}: O={completed_candle['open']:.2f}, H={completed_candle['high']:.2f}, L={completed_candle['low']:.2f}, C={completed_candle['close']:.2f}")
+        minute_floor = (current_time.minute // interval_minutes) * interval_minutes
+        candle_start_dt = current_time.replace(minute=minute_floor, second=0, microsecond=0)
 
-                    # Initialize the new candle
-                    candle_info.update({'open': ltp_scaled, 'high': ltp_scaled, 'low': ltp_scaled, 'start_time': candle_start_dt})
+        # Check if a new candle needs to be started
+        if candle_info.get('start_time') is None or candle_start_dt > candle_info['start_time']:
+            if candle_info.get('start_time') is not None:
+                # Finalize and store the completed candle
+                completed_candle = {
+                    'open': candle_info['open'], 'high': candle_info['high'], 'low': candle_info['low'],
+                    'close': candle_info['last_ltp'], 'start_time': candle_info['start_time']
+                }
+                completed_candle_storage[token].append(completed_candle)
 
-                # Update the current (ongoing) candle with the latest tick
-                candle_info['high'] = max(candle_info.get('high', ltp_scaled), ltp_scaled)
-                candle_info['low'] = min(candle_info.get('low', ltp_scaled), ltp_scaled)
-                candle_info['last_ltp'] = ltp_scaled
+                # Keep only the last 5 candles to manage memory
+                if len(completed_candle_storage[token]) > 5:
+                    completed_candle_storage[token].pop(0)
+
+                logger.info(f"Completed {interval_key} candle for {token}: O={completed_candle['open']:.2f}, H={completed_candle['high']:.2f}, L={completed_candle['low']:.2f}, C={completed_candle['close']:.2f}")
+
+            # Initialize the new candle
+            candle_info.update({'open': ltp, 'high': ltp, 'low': ltp, 'start_time': candle_start_dt})
+
+        # Update the current (ongoing) candle with the latest tick
+        candle_info['high'] = max(candle_info.get('high', ltp), ltp)
+        candle_info['low'] = min(candle_info.get('low', ltp), ltp)
+        candle_info['last_ltp'] = ltp
 
 # =====================================================================================================================
 #
-#                                         --- SETUP-SPECIFIC FUNCTIONS (ORH & 3% DOWN) ---
+#                                         --- SETUP-SPECIFIC FUNCTIONS (ORH, ORL & 3% DOWN) ---
 #
 # =====================================================================================================================
 
-def fetch_initial_candle_data(smart_api_obj, symbols_to_fetch):
+def fetch_initial_candle_data_3min(smart_api_obj, symbols_to_fetch):
     """Fetches historical 3-min candle data for today to pre-populate candles for ORH setup."""
     logger.info("Fetching initial historical 3-min candle data for today (ORH setup)...")
 
@@ -706,7 +755,7 @@ def fetch_initial_candle_data(smart_api_obj, symbols_to_fetch):
     for token, entries in symbols_to_fetch_copy.items():
         if not entries: continue
         symbol_name, exchange_type = entries[0]['symbol'], entries[0]['exchange_type']
-        exchange_str = {1: "NSE", 3: "BSE"}.get(exchange_type)
+        exchange_str = {1: "NSE", 2: "NFO", 3: "BSE"}.get(exchange_type)
         if not exchange_str:
             logger.warning(f"Cannot fetch history for token {token}, unknown exchange type {exchange_type}"); time.sleep(1); continue
 
@@ -716,9 +765,8 @@ def fetch_initial_candle_data(smart_api_obj, symbols_to_fetch):
                 response = smart_api_obj.getCandleData(historic_param)
                 if response and response.get("status") and response.get("data"):
                     completed_3min_candles[token] = [{'start_time': datetime.datetime.fromisoformat(c[0]), 'open': c[1], 'high': c[2], 'low': c[3], 'close': c[4]} for c in response["data"]]
-                    # MODIFIED: Use ORH_MAX_CANDLES
-                    if len(completed_3min_candles[token]) > ORH_MAX_CANDLES:
-                        completed_3min_candles[token] = completed_3min_candles[token][-ORH_MAX_CANDLES:]
+                    if len(completed_3min_candles[token]) > 5:
+                        completed_3min_candles[token] = completed_3min_candles[token][-5:]
                     logger.info(f"Fetched {len(completed_3min_candles[token])} 3-min candles for {symbol_name} (Token: {token}).")
                     break
                 else:
@@ -727,11 +775,50 @@ def fetch_initial_candle_data(smart_api_obj, symbols_to_fetch):
             except Exception as e:
                 logger.warning(f"Attempt {attempt + 1}/{MAX_RETRIES}: Error fetching 3-min data for {symbol_name}: {e}")
                 if attempt < MAX_RETRIES - 1: time.sleep(RETRY_DELAY_SECONDS)
-        time.sleep(0.4) # Add delay between each symbol fetch to avoid rate limiting
+        time.sleep(0.4)
 
-def fetch_previous_day_candle_data(smart_api_obj, symbols_to_fetch):
+# --- START: NEW ORL FUNCTION ---
+def fetch_initial_candle_data_5min(smart_api_obj, symbols_to_fetch):
+    """Fetches historical 5-min candle data for today to pre-populate candles for ORL setup."""
+    logger.info("Fetching initial historical 5-min candle data for today (ORL setup)...")
+
+    now_ist = get_ist_time()
+    from_date = now_ist.replace(hour=9, minute=15, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
+    to_date = now_ist.strftime("%Y-%m-%d %H:%M")
+    MAX_RETRIES, RETRY_DELAY_SECONDS = 5, 20
+
+    with data_lock:
+        symbols_to_fetch_copy = symbols_to_fetch.copy()
+
+    for token, entries in symbols_to_fetch_copy.items():
+        if not entries: continue
+        symbol_name, exchange_type = entries[0]['symbol'], entries[0]['exchange_type']
+        exchange_str = {1: "NSE", 2: "NFO", 3: "BSE"}.get(exchange_type)
+        if not exchange_str:
+            logger.warning(f"Cannot fetch 5-min history for token {token}, unknown exchange type {exchange_type}"); time.sleep(1); continue
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                historic_param = {"exchange": exchange_str, "symboltoken": token, "interval": "FIVE_MINUTE", "fromdate": from_date, "todate": to_date}
+                response = smart_api_obj.getCandleData(historic_param)
+                if response and response.get("status") and response.get("data"):
+                    completed_5min_candles[token] = [{'start_time': datetime.datetime.fromisoformat(c[0]), 'open': c[1], 'high': c[2], 'low': c[3], 'close': c[4]} for c in response["data"]]
+                    if len(completed_5min_candles[token]) > 5:
+                        completed_5min_candles[token] = completed_5min_candles[token][-5:]
+                    logger.info(f"Fetched {len(completed_5min_candles[token])} 5-min candles for {symbol_name} (Token: {token}).")
+                    break
+                else:
+                    logger.warning(f"Attempt {attempt + 1}/{MAX_RETRIES}: Could not fetch 5-min data for {symbol_name}. Message: {response.get('message', 'Unknown error')}")
+                    if attempt < MAX_RETRIES - 1: time.sleep(RETRY_DELAY_SECONDS)
+            except Exception as e:
+                logger.warning(f"Attempt {attempt + 1}/{MAX_RETRIES}: Error fetching 5-min data for {symbol_name}: {e}")
+                if attempt < MAX_RETRIES - 1: time.sleep(RETRY_DELAY_SECONDS)
+        time.sleep(0.4)
+# --- END: NEW ORL FUNCTION ---
+
+def fetch_previous_day_candle_data_high(smart_api_obj, symbols_to_fetch):
     """Fetches the previous day's ONE_DAY candle data for ORH setup, using a local cache first."""
-    logger.info("Fetching previous day's candle data (ORH setup)...")
+    logger.info("Fetching previous day's HIGH candle data (ORH setup)...")
 
     yesterday = datetime.date.today() - timedelta(days=1)
     while yesterday.weekday() >= 5: yesterday -= timedelta(days=1)
@@ -749,7 +836,7 @@ def fetch_previous_day_candle_data(smart_api_obj, symbols_to_fetch):
         if token in previous_day_high_cache and previous_day_high_cache[token].get('date') == yesterday_str:
             logger.info(f"Previous Day's High for {symbol_name} (Token: {token}): {previous_day_high_cache[token]['high']:.2f} (from cache)"); time.sleep(0.1); continue
 
-        exchange_str = {1: "NSE", 3: "BSE"}.get(exchange_type)
+        exchange_str = {1: "NSE", 2: "NFO", 3: "BSE"}.get(exchange_type)
         if not exchange_str:
             logger.warning(f"Cannot fetch previous day history for token {token}, unknown exchange type {exchange_type}"); time.sleep(1); continue
 
@@ -771,7 +858,53 @@ def fetch_previous_day_candle_data(smart_api_obj, symbols_to_fetch):
             except Exception as e:
                 logger.warning(f"Attempt {attempt + 1}/{MAX_RETRIES}: Exception while fetching data for {symbol_name}: {e}")
                 if attempt < MAX_RETRIES - 1: time.sleep(RETRY_DELAY_SECONDS)
-        time.sleep(0.4) # Add delay between each symbol fetch to avoid rate limiting
+        time.sleep(0.4)
+
+# --- START: NEW ORL FUNCTION ---
+def fetch_previous_day_candle_data_low(smart_api_obj, symbols_to_fetch):
+    """Fetches the previous day's ONE_DAY candle data for ORL setup, using a local cache first."""
+    logger.info("Fetching previous day's LOW candle data (ORL setup)...")
+
+    yesterday = datetime.date.today() - timedelta(days=1)
+    while yesterday.weekday() >= 5: yesterday -= timedelta(days=1)
+    from_date = datetime.datetime.combine(yesterday, datetime.time.min).strftime("%Y-%m-%d %H:%M")
+    to_date = datetime.datetime.combine(yesterday, datetime.time.max).strftime("%Y-%m-%d %H:%M")
+    yesterday_str = yesterday.strftime("%Y-%m-%d")
+    MAX_RETRIES, RETRY_DELAY_SECONDS = 5, 30
+
+    with data_lock:
+        symbols_to_fetch_copy = symbols_to_fetch.copy()
+
+    for token, entries in symbols_to_fetch_copy.items():
+        if not entries: continue
+        symbol_name, exchange_type = entries[0]['symbol'], entries[0]['exchange_type']
+        if token in previous_day_low_cache and previous_day_low_cache[token].get('date') == yesterday_str:
+            logger.info(f"Previous Day's Low for {symbol_name} (Token: {token}): {previous_day_low_cache[token]['low']:.2f} (from cache)"); time.sleep(0.1); continue
+
+        exchange_str = {1: "NSE", 2: "NFO", 3: "BSE"}.get(exchange_type)
+        if not exchange_str:
+            logger.warning(f"Cannot fetch previous day history for token {token}, unknown exchange type {exchange_type}"); time.sleep(1); continue
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                historic_param = {"exchange": exchange_str, "symboltoken": token, "interval": "ONE_DAY", "fromdate": from_date, "todate": to_date}
+                response = smart_api_obj.getCandleData(historic_param)
+                if response and response.get("status") and response.get("data"):
+                    if response["data"]:
+                        previous_day_low = response["data"][0][3] # Index 3 is for 'low'
+                        logger.info(f"Previous Day's Low for {symbol_name} (Token: {token}): {previous_day_low:.2f} (fetched from API)")
+                        previous_day_low_cache[token] = {'date': yesterday_str, 'low': previous_day_low}
+                        save_previous_day_low_cache()
+                        break
+                    else: logger.warning(f"No previous day's candle data found for {token} ({symbol_name})."); break
+                else:
+                    logger.warning(f"Attempt {attempt + 1}/{MAX_RETRIES}: Could not fetch data for {symbol_name}. Message: {response.get('message', 'Unknown error')}")
+                    if attempt < MAX_RETRIES - 1: time.sleep(RETRY_DELAY_SECONDS)
+            except Exception as e:
+                logger.warning(f"Attempt {attempt + 1}/{MAX_RETRIES}: Exception while fetching data for {symbol_name}: {e}")
+                if attempt < MAX_RETRIES - 1: time.sleep(RETRY_DELAY_SECONDS)
+        time.sleep(0.4)
+# --- END: NEW ORL FUNCTION ---
 
 def fetch_historical_candles_for_3pct_down(smart_api_obj, tokens_to_fetch, interval_api):
     """
@@ -816,7 +949,7 @@ def fetch_historical_candles_for_3pct_down(smart_api_obj, tokens_to_fetch, inter
         elif token in dynamic_setup_copy and dynamic_setup_copy[token]:
             symbol_name = dynamic_setup_copy[token][0].get('symbol', 'Unknown')
 
-        exchange_str = {1: "NSE", 3: "BSE"}.get(exchange_type)
+        exchange_str = {1: "NSE", 2: "NFO", 3: "BSE"}.get(exchange_type)
         if not exchange_str:
             logger.warning(f"Cannot fetch history for token {token}, unknown exchange type {exchange_type}")
             time.sleep(1)
@@ -866,7 +999,7 @@ def fetch_monthly_highs(smart_api_obj, tokens_to_fetch):
         tokens_to_fetch_copy = list(tokens_to_fetch)
 
     for token, exchange_type in tokens_to_fetch_copy:
-        exchange_str = {1: "NSE", 3: "BSE"}.get(exchange_type)
+        exchange_str = {1: "NSE", 2: "NFO", 3: "BSE"}.get(exchange_type)
         if not exchange_str:
             continue
 
@@ -907,10 +1040,17 @@ def fetch_monthly_highs(smart_api_obj, tokens_to_fetch):
 
         time.sleep(0.5) # API rate limiting
 
+# =====================================================================================================================
+#
+#                                --- START: MODIFIED SECTION WITH DEBUG LOGGING ---
+#
+# =====================================================================================================================
+
 def check_and_update_orh_setup():
     """
     Checks the latest completed 3-min candle for ORH setup, updates Google Sheet,
     and creates a pre-filled order row in the 'Orders' sheet.
+    MODIFIED: Includes detailed debug logging for troubleshooting.
     """
     logger.info("Checking latest 3-min candle for ORH setup...")
     updates_queued = []
@@ -918,34 +1058,61 @@ def check_and_update_orh_setup():
     dashboard_data = Dashboard.get_all_values()
 
     with data_lock:
-        setup_details_copy = excel_setup_details.copy()
+        setup_details_copy = excel_orh_setup_details.copy()
 
     for token, symbol_entries in setup_details_copy.items():
-        filtered_symbol_entries = [entry for entry in symbol_entries if entry['row'] <= ORH_MAX_ROW]
+        filtered_symbol_entries = [entry for entry in symbol_entries if entry['row'] <= SETUP_MAX_ROW]
         if not filtered_symbol_entries:
             continue
 
-        candles, prev_high_entry = completed_3min_candles.get(token, []), previous_day_high_cache.get(token)
-        if not candles or not prev_high_entry or not prev_high_entry.get("high"):
+        symbol_name_for_log = filtered_symbol_entries[0]['symbol']
+        logger.info(f"--- [ORH DEBUG: {symbol_name_for_log}] ---")
+
+        candles = completed_3min_candles.get(token, [])
+        if not candles:
+            logger.info(f" - RESULT: NO TRIGGER. Reason: No completed 3-minute candles found for this symbol yet.")
+            continue
+
+        prev_high_entry = previous_day_high_cache.get(token)
+        if not prev_high_entry or not prev_high_entry.get("high"):
+            logger.info(f" - RESULT: NO TRIGGER. Reason: Previous day's high is not available for this symbol.")
             continue
 
         prev_high = prev_high_entry["high"]
         latest_candle = candles[-1]
         high, low, close = latest_candle['high'], latest_candle['low'], latest_candle['close']
 
+        logger.info(f" - Previous Day's High: {prev_high:.2f}")
+        logger.info(f" - Latest 3m Candle (at {latest_candle['start_time']:%H:%M}): H={high:.2f}, L={low:.2f}, C={close:.2f}")
+
         for entry in filtered_symbol_entries:
             row, row_idx = entry["row"], entry["row"] - 1
 
-            current_orh_value = dashboard_data[row_idx][col_to_num(ORH_RESULT_COL) - 1] if len(dashboard_data) > row_idx and len(dashboard_data[row_idx]) >= col_to_num(ORH_RESULT_COL) else ""
+            current_orh_value = dashboard_data[row_idx][col_to_num(SETUP_RESULT_COL) - 1] if len(dashboard_data) > row_idx and len(dashboard_data[row_idx]) >= col_to_num(SETUP_RESULT_COL) else ""
 
             if "Yes" in current_orh_value:
+                logger.info(f" - RESULT: SKIPPED. Reason: A trigger has already been recorded in the sheet for row {row}.")
                 continue
 
-            if high != low and close >= (low + 0.7 * (high - low)) and close > prev_high:
+            # --- Detailed Condition Checks ---
+            cond1_breakout = close > prev_high
+            cond2_strong_close = high != low and close >= (low + 0.7 * (high - low))
+            cond3_valid_candle = high != low
+
+            logger.info(f" - Condition 1 (Close > Prev High): {close:.2f} > {prev_high:.2f} -> {cond1_breakout}")
+            if high != low:
+                strong_close_threshold = low + 0.7 * (high - low)
+                logger.info(f" - Condition 2 (Strong Close): {close:.2f} >= {strong_close_threshold:.2f} -> {cond2_strong_close}")
+            else:
+                logger.info(f" - Condition 2 (Strong Close): Skipped, candle has no range (high == low).")
+            logger.info(f" - Condition 3 (Valid Candle): {high:.2f} != {low:.2f} -> {cond3_valid_candle}")
+
+
+            if cond1_breakout and cond2_strong_close and cond3_valid_candle:
+                logger.info(f" - RESULT: ORH TRIGGERED for {entry['symbol']} at {latest_candle['start_time']:%Y-%m-%d %H:%M:%S}")
+
                 trigger_time_str = latest_candle['start_time'].strftime('%H:%M')
                 buy_stop_value = round(low * 0.995, 2)
-
-                logger.info(f"ORH Triggered for {entry['symbol']} at {latest_candle['start_time']:%Y-%m-%d %H:%M:%S} > H:{high}, L:{low}, C:{close}")
 
                 if winsound:
                     try:
@@ -953,23 +1120,22 @@ def check_and_update_orh_setup():
                     except Exception as e:
                         logger.warning(f"Sound alert failed: {e}")
 
-                updates_queued.append({"range": f"{ORH_RESULT_COL}{row}", "values": [[f"Yes, {high:.2f} ({trigger_time_str})"]]})
+                updates_queued.append({"range": f"{SETUP_RESULT_COL}{row}", "values": [[f"Yes, {high:.2f} ({trigger_time_str})"]]})
 
                 if high > 0:
                     stop_loss_pct = (high - buy_stop_value) / high
                     buy_stop_output = f"{buy_stop_value:.2f} ({stop_loss_pct:.2%})"
                 else:
                     buy_stop_output = f"{buy_stop_value:.2f}"
-                updates_queued.append({"range": f"{ORH_BUY_STOP_COL}{row}", "values": [[buy_stop_output]]})
+                updates_queued.append({"range": f"{SETUP_STOP_COL}{row}", "values": [[buy_stop_output]]})
 
-                # --- TRIGGER APPS SCRIPT FOR NEW TRADE ---
                 trigger_apps_script_alert("new_trade", row, entry['symbol'], entry['exchange'])
-                time.sleep(2) # Add a delay to prevent overwhelming the Apps Script
+                time.sleep(2)
 
                 try:
-                    symbol = dashboard_data[row_idx][col_to_num(ORH_SYMBOL_COL) - 1]
-                    exchange = dashboard_data[row_idx][col_to_num(ORH_EXCHANGE_COL) - 1]
-                    quantity = dashboard_data[row_idx][col_to_num(ORH_QTY_COL) - 1]
+                    symbol = dashboard_data[row_idx][col_to_num(SETUP_SYMBOL_COL) - 1]
+                    exchange = dashboard_data[row_idx][col_to_num(SETUP_EXCHANGE_COL) - 1]
+                    quantity = dashboard_data[row_idx][col_to_num(SETUP_QTY_COL) - 1]
 
                     if not quantity or int(quantity) <= 0:
                         logger.warning(f"Cannot create order for {symbol}, quantity is missing or zero in column I.")
@@ -993,12 +1159,231 @@ def check_and_update_orh_setup():
 
                 except Exception as e:
                     logger.exception(f"Failed to create order row for {symbol}: {e}")
+            else:
+                # --- Log the specific reason for failure ---
+                failure_reason = ""
+                if not cond1_breakout: failure_reason = "Close was not above previous day's high."
+                elif not cond2_strong_close: failure_reason = "Close was not in the top 30% of the candle's range."
+                elif not cond3_valid_candle: failure_reason = "Candle had no range (high == low)."
+                logger.info(f" - RESULT: NO TRIGGER. Reason: {failure_reason}")
+
 
     if updates_queued:
         Dashboard.batch_update(updates_queued)
         logger.info(f"Applied {len(updates_queued)} ORH updates to Dashboard.")
     else:
         logger.info("No ORH setup updates needed.")
+
+
+def check_and_update_orl_setup():
+    """
+    Checks the latest completed 5-min candle for ORL setup, updates Google Sheet,
+    and creates a pre-filled SELL order row in the 'Orders' sheet.
+    MODIFIED: Includes detailed debug logging for troubleshooting.
+    """
+    logger.info("Checking latest 5-min candle for ORL setup...")
+    updates_queued = []
+
+    dashboard_data = Dashboard.get_all_values()
+
+    with data_lock:
+        setup_details_copy = excel_orl_setup_details.copy()
+
+    for token, symbol_entries in setup_details_copy.items():
+        filtered_symbol_entries = [entry for entry in symbol_entries if entry['row'] <= SETUP_MAX_ROW]
+        if not filtered_symbol_entries:
+            continue
+
+        symbol_name_for_log = filtered_symbol_entries[0]['symbol']
+        logger.info(f"--- [ORL DEBUG: {symbol_name_for_log}] ---")
+
+        candles = completed_5min_candles.get(token, [])
+        if not candles:
+            logger.info(f" - RESULT: NO TRIGGER. Reason: No completed 5-minute candles found for this symbol yet.")
+            continue
+
+        prev_low_entry = previous_day_low_cache.get(token)
+        if not prev_low_entry or not prev_low_entry.get("low"):
+            logger.info(f" - RESULT: NO TRIGGER. Reason: Previous day's low is not available for this symbol.")
+            continue
+
+        prev_low = prev_low_entry["low"]
+        latest_candle = candles[-1]
+        high, low, close = latest_candle['high'], latest_candle['low'], latest_candle['close']
+
+        logger.info(f" - Previous Day's Low: {prev_low:.2f}")
+        logger.info(f" - Latest 5m Candle (at {latest_candle['start_time']:%H:%M}): H={high:.2f}, L={low:.2f}, C={close:.2f}")
+
+        for entry in filtered_symbol_entries:
+            row, row_idx = entry["row"], entry["row"] - 1
+
+            current_orl_value = dashboard_data[row_idx][col_to_num(SETUP_RESULT_COL) - 1] if len(dashboard_data) > row_idx and len(dashboard_data[row_idx]) >= col_to_num(SETUP_RESULT_COL) else ""
+
+            if "Yes" in current_orl_value:
+                logger.info(f" - RESULT: SKIPPED. Reason: A trigger has already been recorded in the sheet for row {row}.")
+                continue
+
+            # --- Detailed Condition Checks ---
+            cond1_breakdown = close < prev_low
+            cond2_weak_close = high != low and close <= (high - 0.7 * (high - low))
+            cond3_valid_candle = high != low
+
+            logger.info(f" - Condition 1 (Close < Prev Low): {close:.2f} < {prev_low:.2f} -> {cond1_breakdown}")
+            if high != low:
+                weak_close_threshold = high - 0.7 * (high - low)
+                logger.info(f" - Condition 2 (Weak Close): {close:.2f} <= {weak_close_threshold:.2f} -> {cond2_weak_close}")
+            else:
+                logger.info(f" - Condition 2 (Weak Close): Skipped, candle has no range (high == low).")
+            logger.info(f" - Condition 3 (Valid Candle): {high:.2f} != {low:.2f} -> {cond3_valid_candle}")
+
+            if cond1_breakdown and cond2_weak_close and cond3_valid_candle:
+                logger.info(f"ORL Triggered for {entry['symbol']} at {latest_candle['start_time']:%Y-%m-%d %H:%M:%S}")
+
+                trigger_time_str = latest_candle['start_time'].strftime('%H:%M')
+                sell_stop_value = round(high * 1.05, 2) # Stop-loss is 5% above the high
+
+                if winsound:
+                    try:
+                        winsound.Beep(600, 400) # Different tone for ORL
+                    except Exception as e:
+                        logger.warning(f"Sound alert failed: {e}")
+
+                updates_queued.append({"range": f"{SETUP_RESULT_COL}{row}", "values": [[f"Yes, {low:.2f} ({trigger_time_str})"]]})
+
+                if low > 0:
+                    stop_loss_pct = (sell_stop_value - low) / low
+                    stop_loss_output = f"{sell_stop_value:.2f} ({stop_loss_pct:.2%})"
+                else:
+                    stop_loss_output = f"{sell_stop_value:.2f}"
+                updates_queued.append({"range": f"{SETUP_STOP_COL}{row}", "values": [[stop_loss_output]]})
+
+                trigger_apps_script_alert("new_trade", row, entry['symbol'], entry['exchange'])
+                time.sleep(2)
+
+                try:
+                    symbol = dashboard_data[row_idx][col_to_num(SETUP_SYMBOL_COL) - 1]
+                    exchange = dashboard_data[row_idx][col_to_num(SETUP_EXCHANGE_COL) - 1]
+                    quantity = dashboard_data[row_idx][col_to_num(SETUP_QTY_COL) - 1]
+
+                    if not quantity or int(quantity) <= 0:
+                        logger.warning(f"Cannot create ORL order for {symbol}, quantity is missing or zero.")
+                        continue
+
+                    trigger_price = round(low * 0.995, 2)
+
+                    new_order_row = [
+                        get_ist_time().strftime("%Y-%m-%d %H:%M:%S"),
+                        symbol,
+                        exchange,
+                        "SELL",
+                        "STOPLOSS_MARKET",
+                        quantity,
+                        trigger_price,
+                        ""
+                    ]
+
+                    OrdersSheet.append_row(new_order_row, value_input_option='USER_ENTERED')
+                    logger.info(f"Successfully created a pre-filled SELL order row for {symbol} in 'Orders' sheet.")
+
+                except Exception as e:
+                    logger.exception(f"Failed to create ORL order row for {symbol}: {e}")
+            else:
+                # --- Log the specific reason for failure ---
+                failure_reason = ""
+                if not cond1_breakdown: failure_reason = "Close was not below previous day's low."
+                elif not cond2_weak_close: failure_reason = "Close was not in the bottom 30% of the candle's range."
+                elif not cond3_valid_candle: failure_reason = "Candle had no range (high == low)."
+                logger.info(f" - RESULT: NO TRIGGER. Reason: {failure_reason}")
+
+
+    if updates_queued:
+        Dashboard.batch_update(updates_queued)
+        logger.info(f"Applied {len(updates_queued)} ORL updates to Dashboard.")
+    else:
+        logger.info("No ORL setup updates needed.")
+
+# =====================================================================================================================
+#
+#                                --- END: MODIFIED SECTION ---
+#
+# =====================================================================================================================
+
+# --- START: NEW TRAILING STOP FUNCTION ---
+def check_and_update_trailing_stop_status():
+    """
+    Checks the 15-minute candle close against a manually entered trailing stop price.
+    """
+    logger.info("Checking for Trailing Stop breakdown...")
+    updates_queued = []
+
+    with data_lock:
+        # We check against the 3pct list because those are the symbols in the "Full Positions" section
+        setup_details_copy = excel_3pct_setup_details.copy()
+        volume_history_copy = volume_history_3pct.copy()
+
+    if not setup_details_copy:
+        return
+
+    try:
+        # Fetch all necessary columns in one go to be efficient
+        last_row = max((e['row'] for token, entries in setup_details_copy.items() for e in entries if entries), default=0)
+        if last_row < START_ROW_DATA:
+            return
+
+        range_to_get = f"{TRAILING_STOP_INPUT_COL}{START_ROW_DATA}:{TRAILING_STOP_STATUS_COL}{last_row}"
+        sheet_data = Dashboard.get(range_to_get)
+
+    except Exception as e:
+        logger.error(f"Failed to fetch trailing stop data from Google Sheet: {e}")
+        return
+
+    for token, symbol_entries in setup_details_copy.items():
+        # Get the latest 15-minute candle for this token
+        candle_history = volume_history_copy.get(token, {}).get('FIFTEEN_MINUTE')
+        if not candle_history:
+            continue
+        last_completed_candle = candle_history[-1]
+        last_close = last_completed_candle['close']
+
+        for entry in symbol_entries:
+            row = entry["row"]
+            row_idx = row - START_ROW_DATA
+
+            if row_idx < 0 or row_idx >= len(sheet_data):
+                continue
+
+            row_data = sheet_data[row_idx]
+            
+            # Read trailing stop price from Column Y
+            trailing_stop_price_str = row_data[0] if len(row_data) > 0 else None
+            current_status = row_data[1] if len(row_data) > 1 else ""
+
+            if not trailing_stop_price_str:
+                # If the trailing stop price is cleared, clear the status as well
+                if current_status.strip() != "":
+                    updates_queued.append({"range": f"{TRAILING_STOP_STATUS_COL}{row}", "values": [['']]})
+                continue
+
+            try:
+                trailing_stop_price = float(str(trailing_stop_price_str).replace(',', ''))
+            except (ValueError, TypeError):
+                # If the value in the cell is not a valid number, skip it
+                continue
+
+            new_status = ""
+            if last_close < trailing_stop_price:
+                new_status = "Breakdown"
+
+            if new_status != current_status.strip():
+                updates_queued.append({"range": f"{TRAILING_STOP_STATUS_COL}{row}", "values": [[new_status]]})
+
+    if updates_queued:
+        Dashboard.batch_update(updates_queued, value_input_option='USER_ENTERED')
+        logger.info(f"Applied {len(updates_queued)} Trailing Stop status updates to Dashboard.")
+    else:
+        logger.info("No Trailing Stop status updates were needed.")
+
+# --- END: NEW TRAILING STOP FUNCTION ---
 
 
 def check_and_update_price_volume_setups():
@@ -1761,9 +2146,10 @@ def scan_sheet_for_all_symbols(Dashboard, ATHCache):
     logger.info("Scanning Google Sheet for all symbols (Dashboard and Setups)...")
 
     local_dashboard_details = collections.defaultdict(list)
-    local_setup_details = collections.defaultdict(list)
+    local_orh_setup_details = collections.defaultdict(list) # MODIFIED
+    local_orl_setup_details = collections.defaultdict(list) # NEW
     local_3pct_setup_details = collections.defaultdict(list)
-    local_dynamic_setups = collections.defaultdict(list) # <-- NEW
+    local_dynamic_setups = collections.defaultdict(list)
     all_tokens_found = set()
 
     scan_session_token_cache = {}
@@ -1774,14 +2160,12 @@ def scan_sheet_for_all_symbols(Dashboard, ATHCache):
         all_dashboard_values = Dashboard.get_all_values()
         all_ath_cache_values = ATHCache.get_all_values()
 
-        # --- NEW: Find dynamic setup header row ---
         dynamic_setup_start_row = None
         dynamic_setup_symbol_col = 'B'
         dynamic_setup_exchange_col = 'A'
         for i, row_data in enumerate(all_dashboard_values):
             if "Low of Highest Down candle" in row_data and "High of Highest Up candle" in row_data:
-                dynamic_setup_start_row = i + 2 # Start scanning from the row below the header
-                # Find the actual column letters
+                dynamic_setup_start_row = i + 2
                 for j, cell_value in enumerate(row_data):
                     if "Symbol" in cell_value:
                         dynamic_setup_symbol_col = chr(ord('A') + j)
@@ -1789,7 +2173,6 @@ def scan_sheet_for_all_symbols(Dashboard, ATHCache):
                         dynamic_setup_exchange_col = chr(ord('A') + j)
                 logger.info(f"Found dynamic setup headers at row {i + 1}. Starting scan from row {dynamic_setup_start_row}.")
                 break
-        # ----------------------------------------
 
         symbol_token_map = {}
         for row_idx, row_data in enumerate(all_ath_cache_values):
@@ -1805,7 +2188,6 @@ def scan_sheet_for_all_symbols(Dashboard, ATHCache):
                 if token and symbol:
                     symbol_token_map[(row_num, ATH_CACHE_Z_COL_DASH)] = (symbol.strip().upper(), token)
 
-        # --- FINAL FIX: Scan both columns C and M to find the true last row ---
         last_row_focus = get_last_row_in_column(Dashboard, FOCUS_SYMBOL_COL)
         last_row_full = get_last_row_in_column(Dashboard, FULL_SYMBOL_COL)
         max_row_dashboard = max(last_row_focus, last_row_full)
@@ -1818,45 +2200,40 @@ def scan_sheet_for_all_symbols(Dashboard, ATHCache):
                 symbol_clean = str(symbol).strip().upper()
                 symbol_col = block_details.get('symbol_col')
 
-                # --- FIX 1: Ignore placeholder "SYMBOL" text ---
                 if not symbol or not exchange or symbol_clean == 'SYMBOL':
                     return
 
-                # --- FIX 2: Use in-memory cache to prevent repetitive logging ---
                 cache_key = (row_num, symbol_col)
                 cached_symbol = scan_memory_cache.get(cache_key)
 
-                # Log only if the symbol is new for this location or has changed
                 if cached_symbol != symbol_clean:
                     logger.info(f"New or changed symbol '{symbol_clean}' found at {cache_key}. Fetching new details.")
                     scan_memory_cache[cache_key] = symbol_clean
 
-                # Now, proceed with the original logic to get instrument details
                 instrument_info = get_or_fetch_instrument_details(symbol, exchange, scan_session_token_cache)
 
                 if instrument_info and instrument_info.get('token'):
                     token = instrument_info['token']
                     all_tokens_found.add(token)
-
-                    # Store the full name along with other details
                     block_details['name'] = instrument_info.get('name')
 
                     if 'ltp_col' in block_details:
                         local_dashboard_details[token].append({'row': row_num, 'symbol': symbol, 'exchange': exchange, **block_details})
                     if 'setup_type' in block_details:
-                        exchange_type_int = {'NSE': 1, 'BSE': 3}.get(str(exchange).strip().upper())
+                        exchange_type_int = {'NSE': 1, 'NFO': 2, 'BSE': 3}.get(str(exchange).strip().upper())
                         if exchange_type_int:
                             setup_info = {'symbol': symbol, 'row': row_num, 'exchange_type': exchange_type_int, 'name': block_details['name'], 'exchange': exchange}
                             if block_details['setup_type'] == 'ORH':
-                                local_setup_details[token].append(setup_info)
+                                local_orh_setup_details[token].append(setup_info)
+                            elif block_details['setup_type'] == 'ORL': # NEW
+                                local_orl_setup_details[token].append(setup_info)
                             elif block_details['setup_type'] == '3PCT':
                                 local_3pct_setup_details[token].append(setup_info)
-                            elif block_details['setup_type'] == 'DYNAMIC': # <-- NEW
+                            elif block_details['setup_type'] == 'DYNAMIC':
                                 local_dynamic_setups[token].append(setup_info)
-                    if token_col: # Only update ATH cache for setups that use it
+                    if token_col:
                         expected_ath_cache_state[(row_num, token_col)] = token
 
-            # --- MODIFIED: Removed the hardcoded row limits ---
             exchange_focus = get_cell_value(all_dashboard_values, row, FOCUS_EXCHANGE_COL)
             symbol_focus = get_cell_value(all_dashboard_values, row, FOCUS_SYMBOL_COL)
             if exchange_focus and symbol_focus:
@@ -1878,24 +2255,24 @@ def scan_sheet_for_all_symbols(Dashboard, ATHCache):
                     'days_duration_col': FULL_DAYS_DURATION_COL
                 })
 
-            exchange_orh = get_cell_value(all_dashboard_values, row, ORH_EXCHANGE_COL)
-            symbol_orh = get_cell_value(all_dashboard_values, row, ORH_SYMBOL_COL)
-            if exchange_orh and symbol_orh and row <= ORH_MAX_ROW:
-                process_symbol(symbol_orh, exchange_orh, row, ORH_TOKEN_COL, {'setup_type': 'ORH', 'symbol_col': ORH_SYMBOL_COL})
+            # --- MODIFIED: Differentiate ORH and ORL setups ---
+            exchange_setup = get_cell_value(all_dashboard_values, row, SETUP_EXCHANGE_COL)
+            symbol_setup = get_cell_value(all_dashboard_values, row, SETUP_SYMBOL_COL)
+            if exchange_setup and symbol_setup and row <= SETUP_MAX_ROW:
+                # Simple logic: If symbol is long, it's an option (ORL). Otherwise, it's a stock (ORH).
+                setup_type = 'ORL' if len(symbol_setup) > 15 else 'ORH'
+                process_symbol(symbol_setup, exchange_setup, row, SETUP_TOKEN_COL, {'setup_type': setup_type, 'symbol_col': SETUP_SYMBOL_COL})
 
             exchange_3pct = get_cell_value(all_dashboard_values, row, PCT_EXCHANGE_COL_3PCT)
             symbol_3pct = get_cell_value(all_dashboard_values, row, PCT_SYMBOL_COL_3PCT)
             if exchange_3pct and symbol_3pct:
                 process_symbol(symbol_3pct, exchange_3pct, row, PCT_TOKEN_COL_3PCT, {'setup_type': '3PCT', 'symbol_col': PCT_SYMBOL_COL_3PCT})
 
-            # --- NEW: Process symbols for the dynamic setup ---
             if dynamic_setup_start_row and row >= dynamic_setup_start_row:
                 exchange_dyn = get_cell_value(all_dashboard_values, row, dynamic_setup_exchange_col)
                 symbol_dyn = get_cell_value(all_dashboard_values, row, dynamic_setup_symbol_col)
                 if exchange_dyn and symbol_dyn:
-                    # Dynamic setups don't write to the ATH Cache, so token_col is None
                     process_symbol(symbol_dyn, exchange_dyn, row, None, {'setup_type': 'DYNAMIC', 'symbol_col': dynamic_setup_symbol_col})
-            # ----------------------------------------------------
 
         max_row_ath_cache_data = len(all_ath_cache_values) if all_ath_cache_values else 0
         rows_to_check_ath_cache = max(max_row_dashboard + 20, max_row_ath_cache_data + 1)
@@ -1928,8 +2305,7 @@ def scan_sheet_for_all_symbols(Dashboard, ATHCache):
         logger.exception(f"Error during unified symbol scan and ATH Cache management: {e}")
 
     logger.info(f"Finished unified scan. Found {len(all_tokens_found)} unique tokens.")
-    # CORRECTED: Return 5 values
-    return local_dashboard_details, local_setup_details, local_3pct_setup_details, local_dynamic_setups, all_tokens_found
+    return local_dashboard_details, local_orh_setup_details, local_orl_setup_details, local_3pct_setup_details, local_dynamic_setups, all_tokens_found
 
 
 def update_excel_live_data():
@@ -2011,7 +2387,7 @@ def update_excel_live_data():
                 if details.get('block_type') == "Focus List":
                     start_col, end_col = 'D', 'J'
                 elif details.get('block_type') == "Full Positions":
-                    start_col, end_col = 'N', 'AG'
+                    start_col, end_col = 'N', 'AI' # MODIFIED
                 else:
                     continue
 
@@ -2210,41 +2586,51 @@ def run_quote_updater():
             logger.exception(f"Error in quote updater thread: {e}")
             time.sleep(10)
 
-def run_initial_setup_data_fetch():
+def run_initial_setup_data_fetch(initial_data_ready_event):
     """
     This function now runs in a dedicated thread to fetch all historical data
     for the setups without blocking the main application startup.
+    MODIFIED: Signals an event when complete.
     """
     logger.info("Starting background fetch for initial setup data...")
+    try:
+        with data_lock:
+            orh_details_copy = excel_orh_setup_details.copy()
+            orl_details_copy = excel_orl_setup_details.copy() # NEW
+            pct3_details_copy = excel_3pct_setup_details.copy()
+            dynamic_setup_copy = excel_dynamic_setups.copy()
 
-    with data_lock:
-        orh_details_copy = excel_setup_details.copy()
-        pct3_details_copy = excel_3pct_setup_details.copy()
-        dynamic_setup_copy = excel_dynamic_setups.copy() # <-- NEW
+        fetch_initial_candle_data_3min(smart_api_obj, orh_details_copy)
+        fetch_initial_candle_data_5min(smart_api_obj, orl_details_copy) # NEW
+        fetch_previous_day_candle_data_high(smart_api_obj, orh_details_copy)
+        fetch_previous_day_candle_data_low(smart_api_obj, orl_details_copy) # NEW
 
-    fetch_initial_candle_data(smart_api_obj, orh_details_copy)
-    fetch_previous_day_candle_data(smart_api_obj, orh_details_copy)
+        # Combine all tokens that need historical data
+        all_tokens_for_history = set()
+        for token, details in pct3_details_copy.items():
+            if details:
+                all_tokens_for_history.add((token, details[0]['exchange_type']))
+        for token, details in dynamic_setup_copy.items():
+            if details:
+                all_tokens_for_history.add((token, details[0]['exchange_type']))
 
-    # Combine all tokens that need historical data
-    all_tokens_for_history = set()
-    for token, details in pct3_details_copy.items():
-        if details:
-            all_tokens_for_history.add((token, details[0]['exchange_type']))
-    for token, details in dynamic_setup_copy.items():
-        if details:
-            all_tokens_for_history.add((token, details[0]['exchange_type']))
+        unique_tokens_for_history = list(all_tokens_for_history)
 
-    unique_tokens_for_history = list(all_tokens_for_history)
+        for interval_api in CANDLE_INTERVALS_3PCT_API:
+            fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_for_history, interval_api)
 
-    for interval_api in CANDLE_INTERVALS_3PCT_API:
-        fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_for_history, interval_api)
+        # After initial fetch, run the checks
+        check_and_update_price_volume_setups()
+        check_and_update_breakdown_status()
+        check_and_update_dynamic_setups()
+        check_and_update_trailing_stop_status() # NEW
 
-    # After initial fetch, run the checks
-    check_and_update_price_volume_setups()
-    check_and_update_breakdown_status()
-    check_and_update_dynamic_setups() # <-- NEW
+        logger.info("Background fetch for initial setup data complete.")
+    except Exception as e:
+        logger.exception(f"An error occurred during initial data fetch: {e}")
+    finally:
+        initial_data_ready_event.set() # <-- Signal that data is ready, even if an error occurred
 
-    logger.info("Background fetch for initial setup data complete.")
 
 def sort_full_positions():
     """
@@ -2316,39 +2702,42 @@ def sort_full_positions():
     except Exception as e:
         logger.exception(f"An error occurred during the automatic sorting process: {e}")
 
-def run_background_task_scheduler():
+def run_background_task_scheduler(initial_data_ready_event):
     """
     This function runs in a dedicated thread to handle all the slower,
     scheduled tasks like scanning the sheet for new symbols and checking for trade setups.
+    MODIFIED: Waits for an event before starting its main loop.
     """
-    global subscribed_tokens, excel_dashboard_details, excel_setup_details, excel_3pct_setup_details, excel_dynamic_setups
+    global subscribed_tokens, excel_dashboard_details, excel_orh_setup_details, excel_orl_setup_details, excel_3pct_setup_details, excel_dynamic_setups
     logger.info("Background task scheduler thread started.")
+    
+    logger.info("Scheduler is waiting for initial data fetch to complete...")
+    initial_data_ready_event.wait() # <-- Wait for the signal
+    logger.info("Initial data is ready. Scheduler is now running.")
 
-    last_checked_minute_orh, last_checked_minute_15min, last_checked_minute_30min, last_checked_minute_1hr = None, None, None, None
+
+    last_checked_minute_orh, last_checked_minute_orl = None, None
+    last_checked_minute_15min, last_checked_minute_30min, last_checked_minute_1hr = None, None, None
     last_scan_time = 0
 
-    # --- MODIFIED: Timers for 24-hour tasks ---
-    # Set to 0 to ensure they run on the first pass
     last_sort_time = 0
     last_monthly_high_fetch_time = 0
 
     while True:
         try:
-            # --- UPDATED ORDER MANAGEMENT FLOW ---
             check_and_place_orders()
             check_and_update_order_statuses()
-            # -------------------------------------
 
             now = get_ist_time()
             current_minute = now.minute
 
-            # Rescan for symbol changes every 15 seconds
             if time.time() - last_scan_time > 15:
                 logger.info("Rescanning Google Sheet for symbol changes...")
-                new_dashboard, new_orh, new_3pct, new_dynamic, current_excel_tokens = scan_sheet_for_all_symbols(Dashboard, ATHCache)
+                new_dashboard, new_orh, new_orl, new_3pct, new_dynamic, current_excel_tokens = scan_sheet_for_all_symbols(Dashboard, ATHCache)
                 with data_lock:
                     excel_dashboard_details = new_dashboard
-                    excel_setup_details = new_orh
+                    excel_orh_setup_details = new_orh
+                    excel_orl_setup_details = new_orl
                     excel_3pct_setup_details = new_3pct
                     excel_dynamic_setups = new_dynamic
 
@@ -2357,12 +2746,12 @@ def run_background_task_scheduler():
                     subscribe_list_grouped = collections.defaultdict(list)
                     for token in tokens_to_subscribe:
                         with data_lock:
-                            # Check all dictionaries to find the exchange type
-                            if token in excel_dashboard_details and excel_dashboard_details[token]: exchange_type_num = {'NSE': 1, 'BSE': 3, 'NFO': 2}.get(excel_dashboard_details[token][0].get('exchange', 'NSE').upper(), 1)
-                            elif token in excel_setup_details and excel_setup_details[token]: exchange_type_num = excel_setup_details[token][0].get('exchange_type', 1)
+                            exchange_type_num = 1 # Default to NSE
+                            if token in excel_dashboard_details and excel_dashboard_details[token]: exchange_type_num = {'NSE': 1, 'NFO': 2, 'BSE': 3}.get(excel_dashboard_details[token][0].get('exchange', 'NSE').upper(), 1)
+                            elif token in excel_orh_setup_details and excel_orh_setup_details[token]: exchange_type_num = excel_orh_setup_details[token][0].get('exchange_type', 1)
+                            elif token in excel_orl_setup_details and excel_orl_setup_details[token]: exchange_type_num = excel_orl_setup_details[token][0].get('exchange_type', 1)
                             elif token in excel_3pct_setup_details and excel_3pct_setup_details[token]: exchange_type_num = excel_3pct_setup_details[token][0].get('exchange_type', 1)
                             elif token in excel_dynamic_setups and excel_dynamic_setups[token]: exchange_type_num = excel_dynamic_setups[token][0].get('exchange_type', 1)
-                            else: exchange_type_num = 1
                         subscribe_list_grouped[exchange_type_num].append(token)
 
                     for ex_type, tokens in subscribe_list_grouped.items():
@@ -2373,8 +2762,7 @@ def run_background_task_scheduler():
 
                 last_scan_time = time.time()
 
-            # --- MODIFIED: Run these tasks once every 24 hours ---
-            if time.time() - last_monthly_high_fetch_time > 86400: # 86400 seconds = 24 hours
+            if time.time() - last_monthly_high_fetch_time > 86400:
                 logger.info("Performing daily fetch for monthly highs (for Swing Low setup)...")
                 with data_lock:
                     unique_tokens_3pct = list(set([(token, details[0]['exchange_type']) for token, details in excel_3pct_setup_details.items() if details]))
@@ -2382,14 +2770,18 @@ def run_background_task_scheduler():
                     fetch_monthly_highs(smart_api_obj, unique_tokens_3pct)
                 last_monthly_high_fetch_time = time.time()
 
-            # --- MODIFIED: Run these tasks once every 24 hours ---
-            if time.time() - last_sort_time > 86400: # 86400 seconds = 24 hours
+            if time.time() - last_sort_time > 86400:
                 sort_full_positions()
                 last_sort_time = time.time()
 
             if current_minute % 3 == 0 and current_minute != last_checked_minute_orh:
                 check_and_update_orh_setup()
                 last_checked_minute_orh = current_minute
+
+            # NEW: Check ORL setup every 5 minutes
+            if current_minute % 5 == 0 and current_minute != last_checked_minute_orl:
+                check_and_update_orl_setup()
+                last_checked_minute_orl = current_minute
 
             with data_lock:
                 has_3pct_symbols = bool(excel_3pct_setup_details)
@@ -2408,21 +2800,22 @@ def run_background_task_scheduler():
                     fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_for_history, 'FIFTEEN_MINUTE')
                     check_and_update_price_volume_setups()
                     check_and_update_breakdown_status()
-                    check_and_update_dynamic_setups() # <-- NEW
+                    check_and_update_dynamic_setups()
+                    check_and_update_trailing_stop_status() # NEW
                     last_checked_minute_15min = current_minute
 
                 if current_minute % 30 == 1 and current_minute != last_checked_minute_30min:
                     fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_for_history, 'THIRTY_MINUTE')
                     check_and_update_price_volume_setups()
                     check_and_update_breakdown_status()
-                    check_and_update_dynamic_setups() # <-- NEW
+                    check_and_update_dynamic_setups()
                     last_checked_minute_30min = current_minute
 
                 if current_minute == 16 and now.hour >= 10 and current_minute != last_checked_minute_1hr:
                     fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_for_history, 'ONE_HOUR')
                     check_and_update_price_volume_setups()
                     check_and_update_breakdown_status()
-                    check_and_update_dynamic_setups() # <-- NEW
+                    check_and_update_dynamic_setups()
                     last_checked_minute_1hr = current_minute
 
             time.sleep(1)
@@ -2573,11 +2966,10 @@ def start_main_application():
     The primary function that initializes connections and runs the main processing loop.
     """
     global smart_api_obj, smart_ws, gsheet, Dashboard, ATHCache, OrdersSheet, subscribed_tokens
-    global excel_dashboard_details, excel_setup_details, excel_3pct_setup_details, instrument_master_list, excel_dynamic_setups
+    global excel_dashboard_details, excel_orh_setup_details, excel_orl_setup_details, excel_3pct_setup_details, instrument_master_list, excel_dynamic_setups
 
     logger.info("Starting Combined Trading Dashboard and Signal Generator...")
 
-    # --- MODIFIED: Download instrument master list at startup for immediate use by other functions ---
     try:
         logger.info(f"Performing initial download of master instrument list from {INSTRUMENT_LIST_URL}...")
         response = requests.get(INSTRUMENT_LIST_URL)
@@ -2619,14 +3011,15 @@ def start_main_application():
         return
 
     load_previous_day_high_cache()
+    load_previous_day_low_cache() # NEW
     logger.info("Performing initial symbol scan...")
-    new_dashboard, new_orh, new_3pct, new_dynamic, all_tokens_for_subscription = scan_sheet_for_all_symbols(Dashboard, ATHCache)
+    new_dashboard, new_orh, new_orl, new_3pct, new_dynamic, all_tokens_for_subscription = scan_sheet_for_all_symbols(Dashboard, ATHCache)
     excel_dashboard_details = new_dashboard
-    excel_setup_details = new_orh
+    excel_orh_setup_details = new_orh
+    excel_orl_setup_details = new_orl
     excel_3pct_setup_details = new_3pct
-    excel_dynamic_setups = new_dynamic # <-- NEW
+    excel_dynamic_setups = new_dynamic
 
-    # --- MODIFIED: Run these tasks once at startup ---
     logger.info("Performing initial one-time fetch for monthly highs and portfolio sort...")
     unique_tokens_3pct_startup = list(set([(token, details[0]['exchange_type']) for token, details in excel_3pct_setup_details.items() if details]))
     if unique_tokens_3pct_startup:
@@ -2651,12 +3044,12 @@ def start_main_application():
         logger.info("Subscribing to initial set of tokens for live data...")
         subscribe_list_grouped = collections.defaultdict(list)
         for token in all_tokens_for_subscription:
-            # Check all dictionaries to find the exchange type
-            if token in excel_dashboard_details and excel_dashboard_details[token]: exchange_type_num = {'NSE': 1, 'BSE': 3, 'NFO': 2}.get(excel_dashboard_details[token][0].get('exchange', 'NSE').upper(), 1)
-            elif token in excel_setup_details and excel_setup_details[token]: exchange_type_num = excel_setup_details[token][0].get('exchange_type', 1)
+            exchange_type_num = 1 # Default to NSE
+            if token in excel_dashboard_details and excel_dashboard_details[token]: exchange_type_num = {'NSE': 1, 'NFO': 2, 'BSE': 3}.get(excel_dashboard_details[token][0].get('exchange', 'NSE').upper(), 1)
+            elif token in excel_orh_setup_details and excel_orh_setup_details[token]: exchange_type_num = excel_orh_setup_details[token][0].get('exchange_type', 1)
+            elif token in excel_orl_setup_details and excel_orl_setup_details[token]: exchange_type_num = excel_orl_setup_details[token][0].get('exchange_type', 1)
             elif token in excel_3pct_setup_details and excel_3pct_setup_details[token]: exchange_type_num = excel_3pct_setup_details[token][0].get('exchange_type', 1)
             elif token in excel_dynamic_setups and excel_dynamic_setups[token]: exchange_type_num = excel_dynamic_setups[token][0].get('exchange_type', 1)
-            else: exchange_type_num = 1
             subscribe_list_grouped[exchange_type_num].append(token)
 
         for ex_type, tokens in subscribe_list_grouped.items():
@@ -2667,7 +3060,6 @@ def start_main_application():
 
     logger.info("Starting concurrent application threads...")
 
-    # --- ADDED: Start the new daily scheduler for the ATH Cache ---
     ath_cache_updater_thread = threading.Thread(target=run_daily_ath_cache_update, daemon=True)
     ath_cache_updater_thread.start()
 
@@ -2677,10 +3069,11 @@ def start_main_application():
     quote_updater_thread = threading.Thread(target=run_quote_updater, daemon=True)
     quote_updater_thread.start()
 
-    initial_data_fetch_thread = threading.Thread(target=run_initial_setup_data_fetch, daemon=True)
+    # --- MODIFIED: Pass the event to the threads ---
+    initial_data_fetch_thread = threading.Thread(target=run_initial_setup_data_fetch, args=(initial_data_ready,), daemon=True)
     initial_data_fetch_thread.start()
 
-    background_scheduler_thread = threading.Thread(target=run_background_task_scheduler, daemon=True)
+    background_scheduler_thread = threading.Thread(target=run_background_task_scheduler, args=(initial_data_ready,), daemon=True)
     background_scheduler_thread.start()
 
     logger.info("All systems are go! The application is now running.")
