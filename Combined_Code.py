@@ -109,7 +109,7 @@ ATH_CACHE_SHEET_NAME = 'ATH Cache'
 ORDERS_SHEET_NAME = 'Orders'
 
 # --- Apps Script Web App URL for Instant Triggers ---
-APPS_SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxT6tjvXC2zZmxNiEBmK8vSmLwR_K0qZHg2BFoAte-uTTrGqSWN9eB2wS-7SjGkcudo/exec" # <-- PASTE YOUR URL HERE
+APPS_SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyY4OOGkGL4_aexGORGbnqQbnoyqc_U1fw0vNBrf-n-H8FQQY0vx_DfYwKQIce8LobT/exec" # <-- PASTE YOUR URL HERE
 
 # --- MODIFIED: Instrument master list URL and global variable ---
 INSTRUMENT_LIST_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
@@ -161,10 +161,12 @@ completed_3min_candles = collections.defaultdict(list)
 volume_history_3pct = collections.defaultdict(lambda: collections.defaultdict(list))
 previous_day_high_cache = {}
 monthly_high_cache = {}
-# --- START: NEW STATE TRACKING FOR 3-MIN ONLY ORH ---
+# --- START: NEW STATE TRACKING ---
 orh_triggered_today = set() # Stores tokens that have already triggered to prevent re-checking
-last_checked_candle_time = {} # Stores the timestamp of the last candle checked
-# --- END: NEW STATE TRACKING FOR 3-MIN ONLY ORH ---
+previous_j_column_state = {} # For manual ORH trigger
+sell_triggered_today = set() # For hybrid Sell trigger
+previous_ah_column_state = {} # For manual Sell trigger
+# --- END: NEW STATE TRACKING ---
 
 
 # For Subscription Management
@@ -219,8 +221,8 @@ HIGH_VOL_RESULT_COL = 'AD'
 HIGH_VOL_STATUS_COL = 'AE'
 PCT_DOWN_RESULT_COL = 'AF'
 PCT_DOWN_STATUS_COL = 'AG'
-SUGGESTION_COL = 'AH'
-FULL_POSITIONS_END_COL = 'AI'
+ACTION_COL = 'AH' # NEW: Replaces SUGGESTION_COL
+FULL_POSITIONS_END_COL = 'AI' # RE-ADDED FOR SORTING
 # --- END: MODIFIED SECTION ---
 
 INDEX_EXCHANGE_COL = 'B'
@@ -649,28 +651,37 @@ class MyWebSocketClient(SmartWebSocketV2):
         """
         This is the unified data handler. It processes each incoming tick for the live dashboard
         and constructs candles for the ORH (3-min) setup.
+        MODIFIED: Now stores day's low from quote updates.
         """
         token = data.get('token')
+        if not token:
+            return
+
+        # Store LTP for fast updates
         ltp_raw = data.get('last_traded_price')
-
-        # Scale prices (API provides them as integers, e.g., 12345 is 123.45)
         ltp_scaled = ltp_raw / 100.0 if isinstance(ltp_raw, (int, float)) else None
-
-        if token and ltp_scaled is not None:
-            # --- Logic for Live Dashboard (applies to all tokens) ---
+        if ltp_scaled is not None:
             latest_tick_data[token]['ltp'] = ltp_scaled
 
-            current_time = get_ist_time()
+        # If it's a full quote, store more details like day's low
+        if data.get("subscription_mode") in [self.QUOTE, self.SNAP_QUOTE]:
+            day_low_raw = data.get('low_price_of_the_day')
+            if day_low_raw is not None:
+                latest_quote_data[token]['day_low'] = day_low_raw / 100.0
 
-            # --- Logic for ORH Setup (3-min candles) ---
-            with data_lock:
-                is_orh_token = token in excel_orh_setup_details
+        # --- Candle processing logic ---
+        current_time = get_ist_time()
+        with data_lock:
+            is_orh_token = token in excel_orh_setup_details
 
-            if is_orh_token:
-                self._process_candle(token, ltp_scaled, current_time, 3, completed_3min_candles)
+        if is_orh_token and ltp_scaled is not None:
+            self._process_candle(token, ltp_scaled, current_time, 3, completed_3min_candles)
 
     def _process_candle(self, token, ltp, current_time, interval_minutes, completed_candle_storage):
-        """Helper function to process a candle of a specific interval."""
+        """
+        Helper function to process a candle of a specific interval.
+        MODIFIED: Now triggers the event-driven ORH check upon candle completion.
+        """
         interval_key = f'{interval_minutes}min'
         candle_info = interval_ohlc_data[token][interval_key]
 
@@ -686,6 +697,13 @@ class MyWebSocketClient(SmartWebSocketV2):
                     'close': candle_info['last_ltp'], 'start_time': candle_info['start_time']
                 }
                 completed_candle_storage[token].append(completed_candle)
+
+                # --- START: MODIFIED SECTION FOR EVENT-DRIVEN ORH ---
+                # If this is a 3-minute candle, schedule the ORH check to run.
+                if interval_minutes == 3:
+                    # We only pass the token now, as the check function will fetch all candles.
+                    threading.Thread(target=schedule_orh_check, args=(token,), daemon=True).start()
+                # --- END: MODIFIED SECTION ---
 
                 # Keep only the last 5 candles to manage memory
                 if len(completed_candle_storage[token]) > 5:
@@ -928,152 +946,162 @@ def fetch_monthly_highs(smart_api_obj, tokens_to_fetch):
 
 # =====================================================================================================================
 #
-#                                --- START: MODIFIED SECTION WITH ORH DEBUG LOGIC ---
+#                                --- START: MODIFIED SECTION WITH HYBRID ORH LOGIC ---
 #
 # =====================================================================================================================
 
-def check_and_update_orh_setup():
+def schedule_orh_check(token):
     """
-    MODIFIED: Checks for ORH setup on the 3-minute timeframe only.
-    It continuously scans every new 3-minute candle. Once a trigger occurs for a stock,
-    it performs all actions and then stops checking that stock for the rest of the day.
-    This version includes detailed debug logging and removes updates to Column J.
+    Schedules the historical ORH check to run after a 2-second delay.
+    This runs in a separate thread to avoid blocking the WebSocket client.
     """
-    logger.info("Checking for 3-Min ORH setup...")
-    updates_queued = []
+    logger.info(f"[ORH EVENT] New 3-Min candle completed for token {token}. Scheduling automatic check.")
+    threading.Thread(target=find_and_process_orh_breakout, args=(token,), daemon=True).start()
 
-    try:
-        last_row = get_last_row_in_column(Dashboard, SETUP_SYMBOL_COL)
-        if last_row > SETUP_MAX_ROW: last_row = SETUP_MAX_ROW
-        if last_row < START_ROW_DATA: return
-
-        range_to_get = f"{SETUP_EXCHANGE_COL}{START_ROW_DATA}:{SETUP_QTY_COL}{last_row}"
-        dashboard_data = Dashboard.get(range_to_get)
-    except Exception as e:
-        logger.error(f"Failed to fetch ORH setup data from Google Sheet: {e}")
-        return
+def find_and_process_orh_breakout(token):
+    """
+    MODIFIED: This function is for the AUTOMATIC trigger. It fetches all of today's 3-minute candles
+    and finds the *first* one that meets the ORH criteria.
+    """
+    time.sleep(2) # Wait 2 seconds for data to settle
 
     with data_lock:
-        setup_details_copy = excel_orh_setup_details.copy()
-
-    for token, symbol_entries in setup_details_copy.items():
-        # If already triggered today, skip completely
         if token in orh_triggered_today:
-            continue
-
+            return
+        setup_details_copy = excel_orh_setup_details.copy()
+        symbol_entries = setup_details_copy.get(token, [])
         filtered_symbol_entries = [entry for entry in symbol_entries if entry['row'] <= SETUP_MAX_ROW]
-        if not filtered_symbol_entries: continue
 
-        symbol_name_for_log = filtered_symbol_entries[0]['symbol']
-        logger.info(f"--- [ORH DEBUG] Checking for {symbol_name_for_log} (Token: {token}) ---")
+    if not filtered_symbol_entries:
+        return
 
-        prev_high_entry = previous_day_high_cache.get(token)
-        if not prev_high_entry or not prev_high_entry.get("high"):
-            logger.info(f"[ORH DEBUG] Skipping {symbol_name_for_log}: Previous day's high not found in cache.")
-            continue
-        prev_high = prev_high_entry["high"]
-        logger.info(f"[ORH DEBUG] Previous Day's High: {prev_high:.2f}")
+    symbol_name_for_log = filtered_symbol_entries[0]['symbol']
+    exchange_name_for_api = filtered_symbol_entries[0]['exchange']
+    logger.info(f"--- [ORH AUTO CHECK] For {symbol_name_for_log} (Token: {token}) ---")
 
-        candles = completed_3min_candles.get(token, [])
-        if not candles:
-            logger.info(f"[ORH DEBUG] Skipping {symbol_name_for_log}: No completed 3-minute candles available.")
-            continue
+    prev_high_entry = previous_day_high_cache.get(token)
+    if not prev_high_entry or not prev_high_entry.get("high"):
+        return
+    prev_high = prev_high_entry["high"]
 
-        # Check the latest candle that has not been checked before
-        latest_candle = candles[-1]
-        candle_time = latest_candle.get('start_time')
-        if last_checked_candle_time.get(token) == candle_time:
-            logger.info(f"[ORH DEBUG] Skipping {symbol_name_for_log}: Latest candle at {candle_time} has already been checked.")
-            continue
+    try:
+        now_ist = get_ist_time()
+        from_date = now_ist.replace(hour=9, minute=15, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
+        to_date = now_ist.strftime("%Y-%m-%d %H:%M")
+        historic_param = {"exchange": exchange_name_for_api, "symboltoken": token, "interval": "THREE_MINUTE", "fromdate": from_date, "todate": to_date}
+        response = smart_api_obj.getCandleData(historic_param)
+        if not (response and response.get("status") and response.get("data")):
+            return
+        todays_candles = [{'start_time': datetime.datetime.fromisoformat(c[0]), 'open': c[1], 'high': c[2], 'low': c[3], 'close': c[4]} for c in response["data"]]
+    except Exception as e:
+        logger.error(f"Error fetching historical 3-min data for {symbol_name_for_log}: {e}")
+        return
 
-        # Update the last checked time to prevent re-processing
-        last_checked_candle_time[token] = candle_time
+    breakout_candle = None
+    for candle in todays_candles:
+        high, low, close = candle['high'], candle['low'], candle['close']
+        if close > prev_high and high != low and (close >= low + 0.7 * (high - low)):
+            breakout_candle = candle
+            break
 
-        high, low, close = latest_candle['high'], latest_candle['low'], latest_candle['close']
-        logger.info(f"[ORH DEBUG] Analyzing 3-Min Candle at {candle_time}: H={high:.2f}, L={low:.2f}, C={close:.2f}")
-
-
-        # --- The Core ORH Logic with Step-by-Step Debugging ---
-        cond1_breakout = close > prev_high
-        logger.info(f"[ORH DEBUG] Condition 1 (Breakout): Is Close ({close:.2f}) > Prev High ({prev_high:.2f})? -> {cond1_breakout}")
-
-        cond3_valid_candle = high != low
-        logger.info(f"[ORH DEBUG] Condition 3 (Valid Candle): Is High ({high:.2f}) != Low ({low:.2f})? -> {cond3_valid_candle}")
-
-        cond2_strong_close = False
-        if cond3_valid_candle:
-            strong_close_threshold = low + 0.7 * (high - low)
-            cond2_strong_close = close >= strong_close_threshold
-            logger.info(f"[ORH DEBUG] Condition 2 (Strong Close): Is Close ({close:.2f}) >= 70% Level ({strong_close_threshold:.2f})? -> {cond2_strong_close}")
-        else:
-            logger.info(f"[ORH DEBUG] Condition 2 (Strong Close): Skipped because candle is not valid.")
-
-
-        if cond1_breakout and cond2_strong_close and cond3_valid_candle:
-            logger.info(f"!!! ORH TRIGGER for {symbol_name_for_log} on 3-Min timeframe. All conditions met. !!!")
-
-            # Add to triggered list to stop further checks for today
+    if breakout_candle:
+        logger.info(f"!!! ORH AUTO TRIGGER for {symbol_name_for_log} based on breakout candle at {breakout_candle['start_time']} !!!")
+        with data_lock:
             orh_triggered_today.add(token)
 
-            update_time_str = get_ist_time().strftime('%H:%M')
-            buy_stop_value = round(low * 0.995, 2)
+        day_low = latest_quote_data.get(token, {}).get('day_low')
+        if not day_low:
+            logger.warning(f"Day's low not available for {symbol_name_for_log}, falling back to candle low for SL.")
+            day_low = breakout_candle['low']
 
-            # --- Prepare Sheet Updates ---
-            new_g_value = f"Yes, {high:.2f} ( 3 Min, {update_time_str} )"
-            if high > 0:
-                stop_loss_pct = (high - buy_stop_value) / high
-                buy_stop_output = f"{buy_stop_value:.2f} ({stop_loss_pct:.2%})"
-            else:
-                buy_stop_output = f"{buy_stop_value:.2f}"
+        process_orh_actions(token, breakout_candle['high'], day_low, breakout_candle['start_time'])
 
-            # --- Perform all actions ---
-            if winsound:
-                try: winsound.Beep(1000, 400)
-                except Exception as e: logger.warning(f"Sound alert failed: {e}")
+def process_manual_orh_trigger(token, row):
+    """
+    MODIFIED: This function is for the MANUAL trigger. It uses the current LTP and Day's Low.
+    """
+    with data_lock:
+        if token in orh_triggered_today:
+            return
+        orh_triggered_today.add(token)
 
-            for entry in filtered_symbol_entries:
-                row = entry["row"]
-                updates_queued.append({"range": f"{SETUP_RESULT_COL}{row}", "values": [[new_g_value]]})
-                updates_queued.append({"range": f"{SETUP_STOP_COL}{row}", "values": [[buy_stop_output]]})
+    symbol_name = excel_orh_setup_details.get(token, [{}])[0].get('symbol', 'Unknown')
+    logger.info(f"!!! ORH MANUAL TRIGGER for {symbol_name} on row {row} !!!")
 
-                # --- CHANGE: Removed the update for Column J ---
-                # new_j_value = f"3 Min, {update_time_str}"
-                # updates_queued.append({"range": f"{SETUP_LOG_COL}{row}", "values": [[new_j_value]]})
+    ltp = latest_tick_data.get(token, {}).get('ltp')
+    day_low = latest_quote_data.get(token, {}).get('day_low')
 
-                # Send alert and create order
-                trigger_apps_script_alert("new_trade", row, entry['symbol'], entry['exchange'])
-                time.sleep(2)
+    if not ltp or not day_low:
+        logger.error(f"Could not trigger manual ORH for {symbol_name}: Missing LTP or Day's Low data.")
+        with data_lock:
+            orh_triggered_today.remove(token) # Re-enable check if data is missing
+        return
 
-                try:
-                    row_idx = row - START_ROW_DATA
-                    if row_idx < 0 or row_idx >= len(dashboard_data): continue
+    process_orh_actions(token, ltp, day_low, get_ist_time())
 
-                    qty_col_idx = col_to_num(SETUP_QTY_COL) - col_to_num('B')
-                    quantity = dashboard_data[row_idx][qty_col_idx] if len(dashboard_data[row_idx]) > qty_col_idx else "0"
 
-                    if not quantity or int(quantity) <= 0:
-                        logger.warning(f"Cannot create order for {entry['symbol']}, quantity is missing or zero.")
-                        continue
+def process_orh_actions(token, buy_price, sl_base_price, trigger_time):
+    """
+    A unified function to handle all actions after an ORH trigger (manual or automatic).
+    """
+    updates_queued = []
+    with data_lock:
+        symbol_entries = excel_orh_setup_details.get(token, [])
+        filtered_symbol_entries = [entry for entry in symbol_entries if entry['row'] <= SETUP_MAX_ROW]
 
-                    trigger_price = round(high * 1.005, 2)
-                    new_order_row = [
-                        get_ist_time().strftime("%Y-%m-%d %H:%M:%S"), entry['symbol'], entry['exchange'],
-                        "BUY", "STOPLOSS_MARKET", quantity, trigger_price, ""
-                    ]
-                    OrdersSheet.append_row(new_order_row, value_input_option='USER_ENTERED')
-                    logger.info(f"Successfully created a pre-filled order row for {entry['symbol']}.")
-                except Exception as e:
-                    logger.exception(f"Failed to create order row for {entry['symbol']}: {e}")
+    if not filtered_symbol_entries:
+        return
 
-            # Since it's triggered, we can stop checking this stock
-            break
-        else:
-            logger.info(f"[ORH DEBUG] No trigger for {symbol_name_for_log} on this candle.")
+    # --- NEW: Use Day's Low for Stop-Loss Calculation ---
+    buy_stop_value = round(sl_base_price * 0.995, 2)
+    update_time_str = trigger_time.strftime('%H:%M')
 
+    # --- Prepare Sheet Updates ---
+    new_g_value = f"Yes, {buy_price:.2f} ({update_time_str})" # REMOVED trigger_type
+    if buy_price > 0:
+        stop_loss_pct = (buy_price - buy_stop_value) / buy_price
+        buy_stop_output = f"{buy_stop_value:.2f} ({stop_loss_pct:.2%})"
+    else:
+        buy_stop_output = f"{buy_stop_value:.2f}"
+
+    if winsound:
+        try: winsound.Beep(1000, 400)
+        except Exception as e: logger.warning(f"Sound alert failed: {e}")
+
+    for entry in filtered_symbol_entries:
+        row = entry["row"]
+        updates_queued.append({"range": f"{SETUP_RESULT_COL}{row}", "values": [[new_g_value]]})
+        updates_queued.append({"range": f"{SETUP_STOP_COL}{row}", "values": [[buy_stop_output]]})
+        updates_queued.append({"range": f"{SETUP_LOG_COL}{row}", "values": [["Buy"]]}) # Set dropdown to Buy
+
+        trigger_apps_script_alert("new_trade", row, entry['symbol'], entry['exchange'])
+        time.sleep(1)
+
+        try:
+            qty_str = Dashboard.acell(f"{SETUP_QTY_COL}{row}").value
+            quantity = int(qty_str) if qty_str and qty_str.isdigit() else 0
+
+            if quantity <= 0:
+                logger.warning(f"Cannot create order for {entry['symbol']}, quantity is missing or zero.")
+                continue
+
+            # For both manual and auto, the order trigger is placed above the buy price
+            order_trigger_price = round(buy_price * 1.005, 2)
+            new_order_row = [
+                get_ist_time().strftime("%Y-%m-%d %H:%M:%S"), entry['symbol'], entry['exchange'],
+                "BUY", "STOPLOSS_MARKET", quantity, order_trigger_price, ""
+            ]
+            OrdersSheet.append_row(new_order_row, value_input_option='USER_ENTERED')
+            logger.info(f"Successfully created a pre-filled order row for {entry['symbol']}.")
+        except Exception as e:
+            logger.exception(f"Failed to create order row for {entry['symbol']}: {e}")
 
     if updates_queued:
-        Dashboard.batch_update(updates_queued)
-        logger.info(f"Applied {len(updates_queued)} ORH updates to Dashboard.")
+        try:
+            Dashboard.batch_update(updates_queued)
+            logger.info(f"Applied {len(updates_queued)} ORH updates to Dashboard.")
+        except Exception as e:
+            logger.error(f"Failed to apply ORH updates to Google Sheet: {e}")
 
 # =====================================================================================================================
 #
@@ -1536,11 +1564,9 @@ def check_and_update_order_statuses():
 
 def check_and_update_breakdown_status():
     """
-    Checks the status of price/volume setups based on the last completed candle.
-    Updates the status column to "Breakdown" or clears it.
-    MODIFIED: Now only triggers alerts if the suggestion text has genuinely changed.
+    MODIFIED: Checks for breakdown status and implements the new hybrid "Sell" trigger system.
     """
-    logger.info("Checking for breakdown status and suggestions...")
+    logger.info("Checking for breakdown status...")
     value_updates = []
     format_updates = []
 
@@ -1556,12 +1582,12 @@ def check_and_update_breakdown_status():
     setups_to_check = [
         {'result_col': HIGHEST_UP_CANDLE_COL, 'status_col': HIGHEST_UP_CANDLE_STATUS_COL},
         {'result_col': HIGH_VOL_RESULT_COL, 'status_col': HIGH_VOL_STATUS_COL},
-        {'result_col': PCT_DOWN_RESULT_COL, 'status_col': PCT_DOWN_STATUS_COL}
+        {'result_col': PCT_DOWN_RESULT_COL, 'status_col': PCT_DOWN_STATUS_COL},
+        {'result_col': TRAILING_STOP_INPUT_COL, 'status_col': TRAILING_STOP_STATUS_COL} # Added Trailing Stop
     ]
 
     try:
-        all_cols = [s['result_col'] for s in setups_to_check] + [s['status_col'] for s in setups_to_check]
-        all_cols.extend([SUGGESTION_COL, FULL_QTY_COL, FULL_POSITIONS_END_COL]) # Add suggestion, qty, and timestamp columns
+        all_cols = [s['status_col'] for s in setups_to_check] + [ACTION_COL]
         start_col = min(all_cols, key=col_to_num)
         end_col = max(all_cols, key=col_to_num)
 
@@ -1577,6 +1603,10 @@ def check_and_update_breakdown_status():
         return
 
     for token, symbol_entries in setup_details_copy.items():
+        if token in sell_triggered_today:
+            continue
+
+        breakdown_detected = False
         for entry in symbol_entries:
             row = entry["row"]
             row_idx = row - START_ROW_DATA
@@ -1584,149 +1614,35 @@ def check_and_update_breakdown_status():
             if row_idx < 0 or row_idx >= len(sheet_data):
                 continue
 
-            row_statuses = {}
-            breakdown_details = collections.defaultdict(list)
-
-            # First, determine the status for each of the three setups
+            # Check each status column for a "Breakdown"
             for setup in setups_to_check:
-                result_col_letter = setup['result_col']
                 status_col_letter = setup['status_col']
-
-                result_col_idx = col_to_num(result_col_letter) - col_to_num(start_col)
                 status_col_idx = col_to_num(status_col_letter) - col_to_num(start_col)
 
-                signal_text = sheet_data[row_idx][result_col_idx] if len(sheet_data[row_idx]) > result_col_idx else ""
-                current_status = sheet_data[row_idx][status_col_idx] if len(sheet_data[row_idx]) > status_col_idx else ""
+                if len(sheet_data[row_idx]) > status_col_idx:
+                    current_status = sheet_data[row_idx][status_col_idx]
+                    if "breakdown" in str(current_status).lower():
+                        breakdown_detected = True
+                        break # Found a breakdown, no need to check other columns for this row
+            if breakdown_detected:
+                break # Move to the next token
 
-                signals = re.findall(r"(\d+\.?\d*)\s*\(([^)]+)\)", str(signal_text))
+        if breakdown_detected:
+            logger.info(f"!!! AUTO SELL TRIGGER for {symbol_entries[0]['symbol']} due to breakdown. !!!")
+            with data_lock:
+                sell_triggered_today.add(token)
 
-                breakdown_count = 0
-                if signals:
-                    for low_str, timeframe_str in signals:
-                        signal_low = float(low_str)
-                        api_timeframe = rev_interval_map.get(timeframe_str.strip())
-
-                        if not api_timeframe: continue
-                        candle_history = volume_history_copy.get(token, {}).get(api_timeframe)
-                        if not candle_history: continue
-
-                        last_completed_candle = candle_history[-1]
-                        if last_completed_candle['close'] < signal_low:
-                            breakdown_count += 1
-                            breakdown_details[status_col_letter].append({
-                                'close': last_completed_candle['close'],
-                                'low': signal_low
-                            })
-
-                new_status = "/".join(["Breakdown"] * breakdown_count) if breakdown_count > 0 else ""
-                row_statuses[status_col_letter] = new_status
-
-                if new_status != current_status.strip():
-                    value_updates.append({"range": f"{status_col_letter}{row}", "values": [[new_status]]})
-
-                bg_color = rgb_to_float((254, 112, 112)) if "Breakdown" in new_status else rgb_to_float(None)
-                format_updates.append({'range': f"{status_col_letter}{row}", 'format': {'backgroundColor': bg_color}})
-
-            new_suggestion = ""
-            status_aa = row_statuses.get(HIGHEST_UP_CANDLE_STATUS_COL, "")
-            status_ac = row_statuses.get(HIGH_VOL_STATUS_COL, "")
-            status_ae = row_statuses.get(PCT_DOWN_STATUS_COL, "")
-
-            exit_100_triggered = False
-
-            if "Breakdown/Breakdown" in status_aa or "Breakdown/Breakdown" in status_ac or "Breakdown/Breakdown" in status_ae:
-                exit_100_triggered = True
-
-                breakdown_closes = []
-                if "Breakdown/Breakdown" in status_aa: breakdown_closes.extend([d['close'] for d in breakdown_details[HIGHEST_UP_CANDLE_STATUS_COL]])
-                if "Breakdown/Breakdown" in status_ac: breakdown_closes.extend([d['close'] for d in breakdown_details[HIGH_VOL_STATUS_COL]])
-                if "Breakdown/Breakdown" in status_ae: breakdown_closes.extend([d['close'] for d in breakdown_details[PCT_DOWN_STATUS_COL]])
-
-                exit_at_price = min(breakdown_closes) if breakdown_closes else 0
-
-                qty_col_idx = col_to_num(FULL_QTY_COL) - col_to_num(start_col)
-                qty_str = sheet_data[row_idx][qty_col_idx] if len(sheet_data[row_idx]) > qty_col_idx else "0"
-
-                try:
-                    qty = int(float(str(qty_str).replace(',', '')))
-                    new_suggestion = f"Exit 100% at {exit_at_price:.2f} ({qty})"
-                except (ValueError, TypeError):
-                    new_suggestion = f"Exit 100% at {exit_at_price:.2f} (QTY_ERR)"
-
-
-            if not exit_100_triggered:
-                breakdown_columns_count = sum(1 for status in [status_aa, status_ac, status_ae] if "Breakdown" in status)
-
-                if breakdown_columns_count >= 2:
-                    breakdown_closes = []
-                    if "Breakdown" in status_aa: breakdown_closes.extend([d['close'] for d in breakdown_details[HIGHEST_UP_CANDLE_STATUS_COL]])
-                    if "Breakdown" in status_ac: breakdown_closes.extend([d['close'] for d in breakdown_details[HIGH_VOL_STATUS_COL]])
-                    if "Breakdown" in status_ae: breakdown_closes.extend([d['close'] for d in breakdown_details[PCT_DOWN_STATUS_COL]])
-
-                    exit_at_price = min(breakdown_closes) if breakdown_closes else 0
-
-                    all_signal_lows = []
-                    for col_letter in [HIGHEST_UP_CANDLE_COL, HIGH_VOL_RESULT_COL, PCT_DOWN_RESULT_COL]:
-                        col_idx = col_to_num(col_letter) - col_to_num(start_col)
-                        text = sheet_data[row_idx][col_idx] if len(sheet_data[row_idx]) > col_idx else ""
-                        signals_in_cell = re.findall(r"(\d+\.?\d*)\s*\(([^)]+)\)", str(text))
-                        all_signal_lows.extend([float(signal[0]) for signal in signals_in_cell])
-
-                    trail_to_price = min(all_signal_lows) if all_signal_lows else 0
-
-                    qty_col_idx = col_to_num(FULL_QTY_COL) - col_to_num(start_col)
-                    qty_str = sheet_data[row_idx][qty_col_idx] if len(sheet_data[row_idx]) > qty_col_idx else "0"
-
-                    try:
-                        qty = int(float(str(qty_str).replace(',', '')))
-                        half_qty = round(qty / 2)
-                        new_suggestion = f"Exit 50% at {exit_at_price:.2f} ({half_qty}) & Trail to {trail_to_price:.2f}"
-                    except (ValueError, TypeError):
-                        new_suggestion = f"Exit 50% at {exit_at_price:.2f} (QTY_ERR) & Trail to {trail_to_price:.2f}"
-
-            suggestion_col_idx = col_to_num(SUGGESTION_COL) - col_to_num(start_col)
-            current_suggestion_on_sheet = sheet_data[row_idx][suggestion_col_idx] if len(sheet_data[row_idx]) > suggestion_col_idx else ""
-
-            # Helper function to get the core instruction type ("100%", "50%", or "Blank")
-            def get_suggestion_type(suggestion_str):
-                if "100%" in suggestion_str:
-                    return "100%"
-                if "50%" in suggestion_str:
-                    return "50%"
-                return "Blank"
-
-            current_suggestion_type = get_suggestion_type(current_suggestion_on_sheet)
-            new_suggestion_type = get_suggestion_type(new_suggestion)
-
-            # Only update the suggestion text if it's different
-            if new_suggestion.strip() != current_suggestion_on_sheet.strip():
-                 value_updates.append({"range": f"{SUGGESTION_COL}{row}", "values": [[new_suggestion]]})
-
-            # --- START: MODIFIED SECTION ---
-            # Only update the timestamp and send alert if the *type* of instruction has changed
-            if new_suggestion_type != current_suggestion_type:
-                logger.info(f"Suggestion TYPE CHANGE DETECTED for {entry['symbol']} at row {row}: from '{current_suggestion_type}' to '{new_suggestion_type}'")
-
-                # Update the timestamp in column AG
-                timestamp_to_write = ""
-                if new_suggestion.strip():
-                    timestamp_to_write = get_ist_time().strftime("%d %B, %I:%M %p")
-                value_updates.append({"range": f"{FULL_POSITIONS_END_COL}{row}", "values": [[timestamp_to_write]]})
-
-                # Send the alert
-                if new_suggestion.strip(): # Only send trigger if there's a new suggestion
-                    logger.info(f"Sending 'position_closed' trigger for row {row}.")
-                    trigger_apps_script_alert("position_closed", row, entry['symbol'], entry['exchange'])
-                    time.sleep(2) # Add a 2-second delay to pace the requests
-            # --- END: MODIFIED SECTION ---
-
+            for entry in symbol_entries:
+                row = entry["row"]
+                # Set dropdown to "Sell"
+                value_updates.append({"range": f"{ACTION_COL}{row}", "values": [["Sell"]]})
+                # Trigger the alert
+                trigger_apps_script_alert("position_closed", row, entry['symbol'], entry['exchange'])
+                time.sleep(1) # Pace the alerts
 
     if value_updates:
         Dashboard.batch_update(value_updates, value_input_option='USER_ENTERED')
-        logger.info(f"Applied {len(value_updates)} status/suggestion value updates to Dashboard.")
-    if format_updates:
-        Dashboard.batch_format(format_updates)
-        logger.info(f"Applied {len(format_updates)} status/suggestion format updates to Dashboard.")
+        logger.info(f"Applied {len(value_updates)} automatic sell updates to Dashboard.")
 
 # =====================================================================================================================
 #
@@ -2186,7 +2102,12 @@ def run_quote_updater():
                             if isinstance(item, dict):
                                 token = item.get("symbolToken")
                                 if token:
-                                    new_quote_data[token] = {"percentChange": item.get("percentChange"), "netChange": item.get("netChange")}
+                                    # MODIFIED: Store day's low along with other quote data
+                                    new_quote_data[token] = {
+                                        "percentChange": item.get("percentChange"),
+                                        "netChange": item.get("netChange"),
+                                        "day_low": item.get("low") # Assuming the key is 'low'
+                                    }
                     else:
                         logger.warning(f"Could not fetch quote data for batch (Exchange: {exchange}, Tokens: {batch_tokens}). Response: {response}")
 
@@ -2318,9 +2239,9 @@ def run_background_task_scheduler(initial_data_ready_event):
     """
     This function runs in a dedicated thread to handle all the slower,
     scheduled tasks like scanning the sheet for new symbols and checking for trade setups.
-    MODIFIED: Waits for an event before starting its main loop.
+    MODIFIED: Now includes a check for manual ORH and Sell triggers from the sheet.
     """
-    global subscribed_tokens, excel_dashboard_details, excel_orh_setup_details, excel_3pct_setup_details
+    global subscribed_tokens, excel_dashboard_details, excel_orh_setup_details, excel_3pct_setup_details, previous_j_column_state, previous_ah_column_state
     logger.info("Background task scheduler thread started.")
 
     logger.info("Scheduler is waiting for initial data fetch to complete...")
@@ -2329,10 +2250,27 @@ def run_background_task_scheduler(initial_data_ready_event):
 
     last_checked_minute_15min, last_checked_minute_30min, last_checked_minute_1hr = None, None, None
     last_scan_time = 0
-    last_orh_check_time = 0 # New timer for the unified ORH check
-
     last_sort_time = 0
     last_monthly_high_fetch_time = 0
+
+    # Initialize the state of columns J and AH
+    try:
+        j_column_range = f"{SETUP_LOG_COL}{START_ROW_DATA}:{SETUP_LOG_COL}{SETUP_MAX_ROW}"
+        j_values = Dashboard.get(j_column_range)
+        for i, cell in enumerate(j_values):
+            row_num = START_ROW_DATA + i
+            previous_j_column_state[row_num] = cell[0] if cell else ""
+
+        last_row_full = get_last_row_in_column(Dashboard, FULL_SYMBOL_COL)
+        if last_row_full >= START_ROW_DATA:
+            ah_column_range = f"{ACTION_COL}{START_ROW_DATA}:{ACTION_COL}{last_row_full}"
+            ah_values = Dashboard.get(ah_column_range)
+            for i, cell in enumerate(ah_values):
+                row_num = START_ROW_DATA + i
+                previous_ah_column_state[row_num] = cell[0] if cell else ""
+    except Exception as e:
+        logger.error(f"Could not initialize column states: {e}")
+
 
     while True:
         try:
@@ -2343,12 +2281,62 @@ def run_background_task_scheduler(initial_data_ready_event):
             current_minute = now.minute
 
             if time.time() - last_scan_time > 15:
-                logger.info("Rescanning Google Sheet for symbol changes...")
+                logger.info("Rescanning Google Sheet for symbol changes and manual triggers...")
                 new_dashboard, new_orh, new_3pct, current_excel_tokens = scan_sheet_for_all_symbols(Dashboard, ATHCache)
                 with data_lock:
                     excel_dashboard_details = new_dashboard
                     excel_orh_setup_details = new_orh
                     excel_3pct_setup_details = new_3pct
+
+                # --- START: NEW LOGIC FOR MANUAL TRIGGERS ---
+                try:
+                    # Manual ORH Buy Trigger
+                    j_column_range = f"{SETUP_LOG_COL}{START_ROW_DATA}:{SETUP_LOG_COL}{SETUP_MAX_ROW}"
+                    current_j_values = Dashboard.get(j_column_range)
+                    token_map_orh = {details['row']: token for token, details_list in new_orh.items() for details in details_list}
+
+                    for i, cell in enumerate(current_j_values):
+                        row_num = START_ROW_DATA + i
+                        current_val = cell[0] if cell else ""
+                        previous_val = previous_j_column_state.get(row_num, "")
+
+                        if current_val.strip().upper() == 'BUY' and previous_val.strip().upper() != 'BUY':
+                            logger.info(f"Manual 'Buy' trigger detected on row {row_num}.")
+                            token_to_trigger = token_map_orh.get(row_num)
+                            if token_to_trigger:
+                                process_manual_orh_trigger(token_to_trigger, row_num)
+                            else:
+                                logger.warning(f"Could not find token for manual ORH trigger on row {row_num}.")
+
+                        previous_j_column_state[row_num] = current_val
+
+                    # Manual Sell Trigger
+                    last_row_full = get_last_row_in_column(Dashboard, FULL_SYMBOL_COL)
+                    if last_row_full >= START_ROW_DATA:
+                        ah_column_range = f"{ACTION_COL}{START_ROW_DATA}:{ACTION_COL}{last_row_full}"
+                        current_ah_values = Dashboard.get(ah_column_range)
+                        token_map_3pct = {details['row']: token for token, details_list in new_3pct.items() for details in details_list}
+
+                        for i, cell in enumerate(current_ah_values):
+                            row_num = START_ROW_DATA + i
+                            current_val = cell[0] if cell else ""
+                            previous_val = previous_ah_column_state.get(row_num, "")
+
+                            if current_val.strip().upper() == 'SELL' and previous_val.strip().upper() != 'SELL':
+                                logger.info(f"Manual 'Sell' trigger detected on row {row_num}.")
+                                token_to_trigger = token_map_3pct.get(row_num)
+                                if token_to_trigger and token_to_trigger not in sell_triggered_today:
+                                    with data_lock:
+                                        sell_triggered_today.add(token_to_trigger)
+                                    entry = new_3pct[token_to_trigger][0]
+                                    trigger_apps_script_alert("position_closed", row_num, entry['symbol'], entry['exchange'])
+                                else:
+                                     logger.warning(f"Could not find token or already triggered for manual Sell on row {row_num}.")
+                            previous_ah_column_state[row_num] = current_val
+
+                except Exception as e:
+                    logger.error(f"Error checking for manual triggers: {e}")
+                # --- END: NEW LOGIC FOR MANUAL TRIGGERS ---
 
                 tokens_to_subscribe = current_excel_tokens - subscribed_tokens
                 if tokens_to_subscribe and smart_ws and smart_ws._is_connected_flag:
@@ -2380,13 +2368,6 @@ def run_background_task_scheduler(initial_data_ready_event):
             if time.time() - last_sort_time > 86400:
                 sort_full_positions()
                 last_sort_time = time.time()
-
-            # --- START: MODIFIED SECTION FOR 3-MIN ONLY ORH ---
-            # This check runs periodically. The internal logic prevents re-triggers.
-            if time.time() - last_orh_check_time > 10: # Check every 10 seconds
-                check_and_update_orh_setup()
-                last_orh_check_time = time.time()
-            # --- END: MODIFIED SECTION FOR 3-MIN ONLY ORH ---
 
             with data_lock:
                 has_3pct_symbols = bool(excel_3pct_setup_details)
