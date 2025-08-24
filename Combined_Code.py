@@ -166,6 +166,7 @@ orh_triggered_today = set() # Stores tokens that have already triggered to preve
 previous_j_column_state = {} # For manual ORH trigger
 sell_triggered_today = set() # For hybrid Sell trigger
 previous_ah_column_state = {} # For manual Sell trigger
+previous_breakdown_state = {} # For dynamic auto-sell trigger
 # --- END: NEW STATE TRACKING ---
 
 
