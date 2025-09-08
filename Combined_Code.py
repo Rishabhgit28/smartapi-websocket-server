@@ -1110,16 +1110,34 @@ def process_orh_actions(token, buy_price, sl_base_price, trigger_time):
 #
 # =====================================================================================================================
 
-# --- START: NEW TRAILING STOP FUNCTION ---
-def check_and_update_trailing_stop_status():
+# --- FIX: START: NEW UNIFIED FUNCTION FOR ALL BREAKDOWN STATUSES ---
+def _get_lowest_price_from_string(text_value):
     """
-    Checks the 15-minute candle close against a manually entered trailing stop price.
+    Helper function to parse a string like "110.50 (15 min), 105.20 (60 min)"
+    and return the lowest numerical value found.
     """
-    logger.info("Checking for Trailing Stop breakdown...")
+    if not text_value or not isinstance(text_value, str):
+        return None
+    try:
+        # Find all occurrences of numbers (including decimals) in the string
+        prices = re.findall(r'[0-9\.]+', text_value)
+        # Convert found strings to floats and return the minimum
+        if prices:
+            return min(float(p) for p in prices)
+    except (ValueError, TypeError):
+        return None
+    return None
+
+def check_and_update_all_breakdown_statuses():
+    """
+    A single, unified function to check and update the status columns for all breakdown conditions
+    (AA, AC, AE, AG) based on the 15-minute candle close. It also handles clearing the status.
+    This function replaces the old check_and_update_trailing_stop_status.
+    """
+    logger.info("Checking all breakdown statuses based on 15-min close...")
     updates_queued = []
 
     with data_lock:
-        # We check against the 3pct list because those are the symbols in the "Full Positions" section
         setup_details_copy = excel_3pct_setup_details.copy()
         volume_history_copy = volume_history_3pct.copy()
 
@@ -1127,16 +1145,34 @@ def check_and_update_trailing_stop_status():
         return
 
     try:
-        # Fetch all necessary columns in one go to be efficient
+        # Define all columns to read from the sheet in one go
+        cols_to_read = [
+            TRAILING_STOP_INPUT_COL, TRAILING_STOP_STATUS_COL,
+            HIGHEST_UP_CANDLE_COL, HIGHEST_UP_CANDLE_STATUS_COL,
+            HIGH_VOL_RESULT_COL, HIGH_VOL_STATUS_COL,
+            PCT_DOWN_RESULT_COL, PCT_DOWN_STATUS_COL
+        ]
+        start_col = min(cols_to_read, key=col_to_num)
+        end_col = max(cols_to_read, key=col_to_num)
+
         last_row = max((e['row'] for token, entries in setup_details_copy.items() for e in entries if entries), default=0)
         if last_row < START_ROW_DATA:
             return
 
-        range_to_get = f"{TRAILING_STOP_INPUT_COL}{START_ROW_DATA}:{TRAILING_STOP_STATUS_COL}{last_row}"
+        range_to_get = f"{start_col}{START_ROW_DATA}:{end_col}{last_row}"
         sheet_data = Dashboard.get(range_to_get)
 
+        # Helper to safely get data from the pre-fetched sheet_data
+        def get_sheet_value(row_idx, col_letter):
+            if row_idx < 0 or row_idx >= len(sheet_data):
+                return ""
+            col_idx = col_to_num(col_letter) - col_to_num(start_col)
+            if col_idx < 0 or col_idx >= len(sheet_data[row_idx]):
+                return ""
+            return sheet_data[row_idx][col_idx]
+
     except Exception as e:
-        logger.error(f"Failed to fetch trailing stop data from Google Sheet: {e}")
+        logger.error(f"Failed to fetch breakdown data from Google Sheet: {e}")
         return
 
     for token, symbol_entries in setup_details_copy.items():
@@ -1144,48 +1180,54 @@ def check_and_update_trailing_stop_status():
         candle_history = volume_history_copy.get(token, {}).get('FIFTEEN_MINUTE')
         if not candle_history:
             continue
-        last_completed_candle = candle_history[-1]
-        last_close = last_completed_candle['close']
+        last_close = candle_history[-1]['close']
 
         for entry in symbol_entries:
-            row = entry["row"]
-            row_idx = row - START_ROW_DATA
+            row, row_idx = entry["row"], entry["row"] - START_ROW_DATA
 
-            if row_idx < 0 or row_idx >= len(sheet_data):
-                continue
+            # --- Define the setups to check ---
+            setups = [
+                {'input_col': TRAILING_STOP_INPUT_COL, 'status_col': TRAILING_STOP_STATUS_COL, 'is_multi_price': False},
+                {'input_col': HIGHEST_UP_CANDLE_COL, 'status_col': HIGHEST_UP_CANDLE_STATUS_COL, 'is_multi_price': True},
+                {'input_col': HIGH_VOL_RESULT_COL, 'status_col': HIGH_VOL_STATUS_COL, 'is_multi_price': True},
+                {'input_col': PCT_DOWN_RESULT_COL, 'status_col': PCT_DOWN_STATUS_COL, 'is_multi_price': True},
+            ]
 
-            row_data = sheet_data[row_idx]
+            for setup in setups:
+                input_val_str = get_sheet_value(row_idx, setup['input_col'])
+                current_status = get_sheet_value(row_idx, setup['status_col'])
+                trigger_price = None
 
-            # Read trailing stop price from Column Y
-            trailing_stop_price_str = row_data[0] if len(row_data) > 0 else None
-            current_status = row_data[1] if len(row_data) > 1 else ""
+                if setup['is_multi_price']:
+                    trigger_price = _get_lowest_price_from_string(input_val_str)
+                else: # For single price inputs like Trailing Stop
+                    try:
+                        trigger_price = float(str(input_val_str).replace(',', '')) if input_val_str else None
+                    except (ValueError, TypeError):
+                        trigger_price = None
 
-            if not trailing_stop_price_str:
-                # If the trailing stop price is cleared, clear the status as well
-                if current_status.strip() != "":
-                    updates_queued.append({"range": f"{TRAILING_STOP_STATUS_COL}{row}", "values": [['']]})
-                continue
+                if trigger_price is None:
+                    # If there's no valid input price, ensure the status is clear
+                    if current_status.strip() != "":
+                        updates_queued.append({"range": f"{setup['status_col']}{row}", "values": [['']]})
+                    continue
 
-            try:
-                trailing_stop_price = float(str(trailing_stop_price_str).replace(',', ''))
-            except (ValueError, TypeError):
-                # If the value in the cell is not a valid number, skip it
-                continue
+                # --- Core Breakdown and Clear Logic ---
+                new_status = ""
+                if last_close < trigger_price:
+                    new_status = "Breakdown"
+                # If the current status is "Breakdown" and price recovers, new_status remains "" (clear)
 
-            new_status = ""
-            if last_close < trailing_stop_price:
-                new_status = "Breakdown"
-
-            if new_status != current_status.strip():
-                updates_queued.append({"range": f"{TRAILING_STOP_STATUS_COL}{row}", "values": [[new_status]]})
+                # Queue update only if the status has changed
+                if new_status.strip() != current_status.strip():
+                    updates_queued.append({"range": f"{setup['status_col']}{row}", "values": [[new_status]]})
 
     if updates_queued:
         Dashboard.batch_update(updates_queued, value_input_option='USER_ENTERED')
-        logger.info(f"Applied {len(updates_queued)} Trailing Stop status updates to Dashboard.")
+        logger.info(f"Applied {len(updates_queued)} dynamic breakdown status updates to Dashboard.")
     else:
-        logger.info("No Trailing Stop status updates were needed.")
-
-# --- END: NEW TRAILING STOP FUNCTION ---
+        logger.info("No dynamic breakdown status updates were needed.")
+# --- FIX: END: NEW UNIFIED FUNCTION ---
 
 
 def check_and_update_price_volume_setups():
@@ -2044,6 +2086,122 @@ def update_excel_live_data():
 #
 # =====================================================================================================================
 
+# --- FIX: START: NEW GLOBAL VARIABLES AND FUNCTIONS FOR DAILY RE-AUTHENTICATION ---
+auth_token = None
+feed_token = None
+websocket_thread = None
+last_login_date = None
+
+def re_authenticate_and_reconnect():
+    """
+    Handles the daily re-authentication process to get new session tokens
+    and restarts the WebSocket connection with the new tokens.
+    """
+    global smart_api_obj, smart_ws, auth_token, feed_token, websocket_thread, subscribed_tokens
+
+    logger.info("--- Starting Daily Re-authentication Process ---")
+
+    # 1. Close the existing WebSocket connection if it's running
+    if smart_ws:
+        logger.info("Closing existing WebSocket connection...")
+        smart_ws.close_connection()
+        if websocket_thread and websocket_thread.is_alive():
+            websocket_thread.join(timeout=5)
+        logger.info("Old WebSocket connection closed.")
+        smart_ws = None
+
+    # 2. Generate a new API session
+    try:
+        logger.info("Generating new SmartAPI session for the day...")
+        totp = pyotp.TOTP(TOTP_SECRET).now()
+        data = smart_api_obj.generateSession(CLIENT_CODE, MPIN, totp=totp)
+        if data and data.get('data') and data['data'].get('jwtToken'):
+            auth_token = data['data']['jwtToken']
+            feed_token = data['data']['feedToken']
+            logger.info("New SmartAPI session generated successfully!")
+        else:
+            logger.error(f"Failed to generate new SmartAPI session. Response: {data}. Aborting reconnect.")
+            return False
+    except Exception as e:
+        logger.exception(f"Exception during new session generation: {e}. Aborting reconnect.")
+        return False
+
+    # 3. Initialize and start a new WebSocket connection
+    try:
+        logger.info("Initializing new WebSocket connection with fresh tokens...")
+        smart_ws = MyWebSocketClient(auth_token, API_KEY, CLIENT_CODE, feed_token)
+        websocket_thread = threading.Thread(target=smart_ws.connect, daemon=True)
+        websocket_thread.start()
+        time.sleep(5)
+        if not smart_ws._is_connected_flag:
+            logger.error("New WebSocket failed to connect. Live feed will not be available.")
+            return False
+        logger.info("New WebSocket connected successfully.")
+    except Exception as e:
+        logger.exception(f"Exception during new WebSocket initialization: {e}.")
+        return False
+
+    # 4. Re-subscribe to all previously subscribed tokens
+    if subscribed_tokens:
+        logger.info(f"Re-subscribing to {len(subscribed_tokens)} previously tracked tokens...")
+        tokens_to_resubscribe = subscribed_tokens.copy()
+        subscribed_tokens.clear()
+
+        subscribe_list_grouped = collections.defaultdict(list)
+        with data_lock:
+             all_details = {**excel_dashboard_details, **excel_orh_setup_details, **excel_3pct_setup_details}
+
+        for token in tokens_to_resubscribe:
+            exchange_type_num = 1 # Default to NSE
+            if token in all_details and all_details[token]:
+                entry = all_details[token][0]
+                if 'exchange' in entry:
+                     exchange_type_num = {'NSE': 1, 'NFO': 2, 'BSE': 3}.get(entry.get('exchange', 'NSE').upper(), 1)
+                elif 'exchange_type' in entry:
+                     exchange_type_num = entry.get('exchange_type', 1)
+            subscribe_list_grouped[exchange_type_num].append(token)
+
+        for ex_type, tokens in subscribe_list_grouped.items():
+            formatted_tokens = [{"exchangeType": ex_type, "tokens": list(tokens)}]
+            smart_ws.subscribe(f"resub_{int(time.time())}", smart_ws.QUOTE, formatted_tokens)
+            subscribed_tokens.update(tokens)
+            logger.info(f"Re-subscribed to {len(tokens)} tokens on exchange type {ex_type}.")
+
+    logger.info("--- Daily Re-authentication Process Complete ---")
+    return True
+
+def run_daily_reauthentication_manager():
+    """
+    A dedicated thread that runs once daily before market open to
+    re-authenticate the API session and restart the WebSocket.
+    """
+    global last_login_date
+    logger.info(f"Daily re-authentication manager started. First login scheduled for tomorrow.")
+
+    while True:
+        try:
+            now_ist = get_ist_time()
+            today_ist = now_ist.date()
+
+            # Check if it's a weekday, time is 8:30 AM, and we haven't logged in today
+            if (0 <= now_ist.weekday() <= 4 and
+                now_ist.hour == 8 and now_ist.minute == 30 and
+                today_ist != last_login_date):
+
+                logger.info(f"Scheduled time 8:30 AM reached. Triggering re-authentication for {today_ist}.")
+                success = re_authenticate_and_reconnect()
+                if success:
+                    last_login_date = today_ist
+                else:
+                    logger.error("Daily re-authentication failed. Will retry tomorrow.")
+                    last_login_date = today_ist
+
+            time.sleep(60)
+        except Exception as e:
+            logger.exception(f"An error occurred in the daily re-authentication manager thread: {e}")
+            time.sleep(300)
+# --- FIX: END: NEW FUNCTIONS ---
+
 def run_live_dashboard_updater():
     """
     This function runs in a dedicated thread to continuously update the Google Sheet
@@ -2156,8 +2314,9 @@ def run_initial_setup_data_fetch(initial_data_ready_event):
 
         # After initial fetch, run the checks
         check_and_update_price_volume_setups()
+        # --- FIX: Call the new unified breakdown checker ---
+        check_and_update_all_breakdown_statuses()
         check_and_update_breakdown_status()
-        check_and_update_trailing_stop_status() # NEW
 
         logger.info("Background fetch for initial setup data complete.")
     except Exception as e:
@@ -2386,8 +2545,8 @@ def run_background_task_scheduler(initial_data_ready_event):
                 if current_minute % 15 == 1 and current_minute != last_checked_minute_15min:
                     fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_for_history, 'FIFTEEN_MINUTE')
                     check_and_update_price_volume_setups()
+                    check_and_update_all_breakdown_statuses() # <-- FIX: Replaced old function
                     check_and_update_breakdown_status()
-                    check_and_update_trailing_stop_status()
                     last_checked_minute_15min = current_minute
 
                 if current_minute % 30 == 1 and current_minute != last_checked_minute_30min:
@@ -2549,8 +2708,10 @@ def start_main_application():
     """
     The primary function that initializes connections and runs the main processing loop.
     """
+    # --- FIX: All session-related variables are now global to be managed by the re-auth process ---
     global smart_api_obj, smart_ws, gsheet, Dashboard, ATHCache, OrdersSheet, subscribed_tokens
     global excel_dashboard_details, excel_orh_setup_details, excel_3pct_setup_details, instrument_master_list
+    global auth_token, feed_token, websocket_thread, last_login_date
 
     logger.info("Starting Combined Trading Dashboard and Signal Generator...")
 
@@ -2586,6 +2747,8 @@ def start_main_application():
         if data and data.get('data') and data['data'].get('jwtToken'):
             auth_token = data['data']['jwtToken']
             feed_token = data['data']['feedToken']
+            # --- FIX: Set the initial login date ---
+            last_login_date = get_ist_time().date()
             logger.info("SmartAPI session generated successfully!")
         else:
             logger.error(f"Failed to generate SmartAPI session. Response: {data}. Exiting.")
@@ -2610,6 +2773,7 @@ def start_main_application():
     try:
         logger.info("Initializing SmartAPI WebSocket...")
         smart_ws = MyWebSocketClient(auth_token, API_KEY, CLIENT_CODE, feed_token)
+        # --- FIX: Assign the thread to the global variable so it can be managed ---
         websocket_thread = threading.Thread(target=smart_ws.connect, daemon=True)
         websocket_thread.start()
         time.sleep(5)
@@ -2639,6 +2803,11 @@ def start_main_application():
 
     logger.info("Starting concurrent application threads...")
 
+    # --- FIX: START: Launch the new daily re-authentication manager thread ---
+    reauth_manager_thread = threading.Thread(target=run_daily_reauthentication_manager, daemon=True)
+    reauth_manager_thread.start()
+    # --- FIX: END ---
+
     ath_cache_updater_thread = threading.Thread(target=run_daily_ath_cache_update, daemon=True)
     ath_cache_updater_thread.start()
 
@@ -2648,7 +2817,6 @@ def start_main_application():
     quote_updater_thread = threading.Thread(target=run_quote_updater, daemon=True)
     quote_updater_thread.start()
 
-    # --- MODIFIED: Pass the event to the threads ---
     initial_data_fetch_thread = threading.Thread(target=run_initial_setup_data_fetch, args=(initial_data_ready,), daemon=True)
     initial_data_fetch_thread.start()
 
@@ -2657,16 +2825,8 @@ def start_main_application():
 
     logger.info("All systems are go! The application is now running.")
 
-    try:
-        while True:
-            time.sleep(60)
-            logger.info("Main thread is alive. All worker threads are running in the background.")
-    except KeyboardInterrupt:
-        logger.info("Script interrupted by user. Closing connections...")
-    finally:
-        if smart_ws:
-            smart_ws.close_connection()
-        logger.info("Script finished.")
+    # --- FIX: The old main loop is no longer needed here. The Flask app's main thread
+    # and the new re-authentication manager will keep the script alive and healthy.
 
 
 # --- Threaded Logic Runner ---
@@ -2681,3 +2841,4 @@ if __name__ == "__main__":
     run_threaded_logic()
     # The Flask app runs in the main thread to keep the service alive for deployment platforms.
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
