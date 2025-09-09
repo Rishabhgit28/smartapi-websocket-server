@@ -2183,12 +2183,12 @@ def run_daily_reauthentication_manager():
             now_ist = get_ist_time()
             today_ist = now_ist.date()
 
-            # Check if it's a weekday, time is 8:30 AM, and we haven't logged in today
+            # Check if it's a weekday, time is 9:10 AM, and we haven't logged in today
             if (0 <= now_ist.weekday() <= 4 and
-                now_ist.hour == 8 and now_ist.minute == 30 and
+                now_ist.hour == 9 and now_ist.minute == 10 and
                 today_ist != last_login_date):
 
-                logger.info(f"Scheduled time 8:30 AM reached. Triggering re-authentication for {today_ist}.")
+                logger.info(f"Scheduled time 9:10 AM reached. Triggering re-authentication for {today_ist}.")
                 success = re_authenticate_and_reconnect()
                 if success:
                     last_login_date = today_ist
