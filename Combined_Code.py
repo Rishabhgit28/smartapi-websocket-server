@@ -2552,12 +2552,14 @@ def run_background_task_scheduler(initial_data_ready_event):
                 if current_minute % 30 == 1 and current_minute != last_checked_minute_30min:
                     fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_for_history, 'THIRTY_MINUTE')
                     check_and_update_price_volume_setups()
+                    check_and_update_all_breakdown_statuses()
                     check_and_update_breakdown_status()
                     last_checked_minute_30min = current_minute
 
                 if current_minute == 16 and now.hour >= 10 and current_minute != last_checked_minute_1hr:
                     fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_for_history, 'ONE_HOUR')
                     check_and_update_price_volume_setups()
+                    check_and_update_all_breakdown_statuses()
                     check_and_update_breakdown_status()
                     last_checked_minute_1hr = current_minute
 
@@ -2841,4 +2843,6 @@ if __name__ == "__main__":
     run_threaded_logic()
     # The Flask app runs in the main thread to keep the service alive for deployment platforms.
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
+
 
