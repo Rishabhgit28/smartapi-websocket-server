@@ -2507,7 +2507,23 @@ def run_background_task_scheduler(initial_data_ready_event):
 
             if time.time() - last_scan_time > 15:
                 logger.info("Rescanning Google Sheet for symbol changes and manual triggers...")
+                
+                # --- FIX: Get the set of old ORH tokens BEFORE the scan ---
+                with data_lock:
+                    old_orh_tokens = set(excel_orh_setup_details.keys())
+
                 new_dashboard, new_orh, new_3pct, current_excel_tokens = scan_sheet_for_all_symbols(Dashboard, ATHCache)
+                
+                # --- FIX: Identify and fetch data for NEWLY added ORH stocks ---
+                new_orh_tokens = set(new_orh.keys())
+                added_orh_tokens = new_orh_tokens - old_orh_tokens
+
+                if added_orh_tokens:
+                    logger.info(f"Detected {len(added_orh_tokens)} new ORH stock(s). Fetching 3-day high data on-the-fly...")
+                    symbols_to_fetch_now = {token: new_orh[token] for token in added_orh_tokens}
+                    # Run the fetch in a separate thread to not block the scheduler
+                    threading.Thread(target=fetch_previous_day_candle_data_high, args=(smart_api_obj, symbols_to_fetch_now), daemon=True).start()
+
                 with data_lock:
                     excel_dashboard_details = new_dashboard
                     excel_orh_setup_details = new_orh
