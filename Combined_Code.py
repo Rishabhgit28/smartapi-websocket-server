@@ -363,7 +363,8 @@ def trigger_apps_script_alert(alert_type, row, symbol, exchange):
 
             logger.info(f"Triggering Apps Script for {alert_type} on row {row} with payload: {payload}")
 
-            response = requests.post(APPS_SCRIPT_WEB_APP_URL, json=payload, timeout=20)
+            # --- FIX: Increased timeout to 60 seconds to handle Google Apps Script cold starts ---
+            response = requests.post(APPS_SCRIPT_WEB_APP_URL, json=payload, timeout=60)
 
             if response.status_code == 200:
                 logger.info(f"Successfully triggered Apps Script. Response: {response.text}")
