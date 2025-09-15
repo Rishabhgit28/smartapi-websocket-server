@@ -764,14 +764,40 @@ def fetch_initial_candle_data_3min(smart_api_obj, symbols_to_fetch):
         time.sleep(0.4)
 
 def fetch_previous_day_candle_data_high(smart_api_obj, symbols_to_fetch):
-    """Fetches the previous day's ONE_DAY candle data for ORH setup, using a local cache first."""
-    logger.info("Fetching previous day's HIGH candle data (ORH setup)...")
+    """
+    MODIFIED: Fetches the daily candle data for the last 3 trading days and finds the maximum high
+    to use as the breakout level for the ORH setup. It uses a local cache first.
+    """
+    logger.info("Fetching last 3 days' HIGH candle data (ORH setup)...")
 
-    yesterday = datetime.date.today() - timedelta(days=1)
-    while yesterday.weekday() >= 5: yesterday -= timedelta(days=1)
-    from_date = datetime.datetime.combine(yesterday, datetime.time.min).strftime("%Y-%m-%d %H:%M")
-    to_date = datetime.datetime.combine(yesterday, datetime.time.max).strftime("%Y-%m-%d %H:%M")
-    yesterday_str = yesterday.strftime("%Y-%m-%d")
+    # --- START: NEW LOGIC to determine the last 3 trading days ---
+    today = datetime.date.today()
+    trading_days_found = []
+    current_day = today - timedelta(days=1)
+    # Go back up to 7 calendar days to ensure we find 3 trading days
+    for _ in range(7):
+        if len(trading_days_found) >= 3:
+            break
+        # Weekday check: Monday is 0, Sunday is 6
+        if current_day.weekday() < 5:
+            trading_days_found.append(current_day)
+        current_day -= timedelta(days=1)
+    
+    if len(trading_days_found) < 1:
+        logger.warning("Could not determine any previous trading days.")
+        return
+
+    # The last trading day is the first in our found list, the earliest is the last
+    to_date = trading_days_found[0]
+    from_date = trading_days_found[-1]
+    
+    from_date_str = from_date.strftime("%Y-%m-%d %H:%M")
+    to_date_str = to_date.strftime("%Y-%m-%d %H:%M")
+    
+    # Use the date of the most recent trading day for the cache key
+    cache_check_date_str = to_date.strftime("%Y-%m-%d")
+    # --- END: NEW LOGIC ---
+
     MAX_RETRIES, RETRY_DELAY_SECONDS = 5, 30
 
     with data_lock:
@@ -780,31 +806,47 @@ def fetch_previous_day_candle_data_high(smart_api_obj, symbols_to_fetch):
     for token, entries in symbols_to_fetch_copy.items():
         if not entries: continue
         symbol_name, exchange_type = entries[0]['symbol'], entries[0]['exchange_type']
-        if token in previous_day_high_cache and previous_day_high_cache[token].get('date') == yesterday_str:
-            logger.info(f"Previous Day's High for {symbol_name} (Token: {token}): {previous_day_high_cache[token]['high']:.2f} (from cache)"); time.sleep(0.1); continue
+        
+        # Check cache using the most recent trading day's date
+        if token in previous_day_high_cache and previous_day_high_cache[token].get('date') == cache_check_date_str:
+            logger.info(f"Last 3 Days' High for {symbol_name} (Token: {token}): {previous_day_high_cache[token]['high']:.2f} (from cache)")
+            time.sleep(0.1)
+            continue
 
         exchange_str = {1: "NSE", 2: "NFO", 3: "BSE"}.get(exchange_type)
         if not exchange_str:
-            logger.warning(f"Cannot fetch previous day history for token {token}, unknown exchange type {exchange_type}"); time.sleep(1); continue
+            logger.warning(f"Cannot fetch previous day history for token {token}, unknown exchange type {exchange_type}")
+            time.sleep(1)
+            continue
 
         for attempt in range(MAX_RETRIES):
             try:
-                historic_param = {"exchange": exchange_str, "symboltoken": token, "interval": "ONE_DAY", "fromdate": from_date, "todate": to_date}
+                historic_param = {"exchange": exchange_str, "symboltoken": token, "interval": "ONE_DAY", "fromdate": from_date_str, "todate": to_date_str}
                 response = smart_api_obj.getCandleData(historic_param)
+                
                 if response and response.get("status") and response.get("data"):
                     if response["data"]:
-                        previous_day_high = response["data"][0][2]
-                        logger.info(f"Previous Day's High for {symbol_name} (Token: {token}): {previous_day_high:.2f} (fetched from API)")
-                        previous_day_high_cache[token] = {'date': yesterday_str, 'high': previous_day_high}
+                        # Extract the high from each day's candle (index 2) and find the maximum
+                        all_highs = [candle[2] for candle in response["data"]]
+                        highest_high_last_3_days = max(all_highs)
+
+                        logger.info(f"Last 3 Days' High for {symbol_name} (Token: {token}): {highest_high_last_3_days:.2f} (fetched from API)")
+                        
+                        # Update cache with the new highest high and the date of the last trading day
+                        previous_day_high_cache[token] = {'date': cache_check_date_str, 'high': highest_high_last_3_days}
                         save_previous_day_high_cache()
                         break
-                    else: logger.warning(f"No previous day's candle data found for {token} ({symbol_name})."); break
+                    else:
+                        logger.warning(f"No previous day's candle data found for {token} ({symbol_name}).")
+                        break
                 else:
                     logger.warning(f"Attempt {attempt + 1}/{MAX_RETRIES}: Could not fetch data for {symbol_name}. Message: {response.get('message', 'Unknown error')}")
-                    if attempt < MAX_RETRIES - 1: time.sleep(RETRY_DELAY_SECONDS)
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_DELAY_SECONDS)
             except Exception as e:
                 logger.warning(f"Attempt {attempt + 1}/{MAX_RETRIES}: Exception while fetching data for {symbol_name}: {e}")
-                if attempt < MAX_RETRIES - 1: time.sleep(RETRY_DELAY_SECONDS)
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_DELAY_SECONDS)
         time.sleep(0.4)
 
 def fetch_historical_candles_for_3pct_down(smart_api_obj, tokens_to_fetch, interval_api):
@@ -1184,13 +1226,14 @@ def check_and_update_all_breakdown_statuses():
 
         for entry in symbol_entries:
             row, row_idx = entry["row"], entry["row"] - START_ROW_DATA
+            symbol = entry.get('symbol', 'Unknown') # Get symbol for logging
 
             # --- Define the setups to check ---
             setups = [
-                {'input_col': TRAILING_STOP_INPUT_COL, 'status_col': TRAILING_STOP_STATUS_COL, 'is_multi_price': False},
-                {'input_col': HIGHEST_UP_CANDLE_COL, 'status_col': HIGHEST_UP_CANDLE_STATUS_COL, 'is_multi_price': True},
-                {'input_col': HIGH_VOL_RESULT_COL, 'status_col': HIGH_VOL_STATUS_COL, 'is_multi_price': True},
-                {'input_col': PCT_DOWN_RESULT_COL, 'status_col': PCT_DOWN_STATUS_COL, 'is_multi_price': True},
+                {'name': 'Trailing Stop', 'input_col': TRAILING_STOP_INPUT_COL, 'status_col': TRAILING_STOP_STATUS_COL, 'is_multi_price': False},
+                {'name': 'Highest Up Candle', 'input_col': HIGHEST_UP_CANDLE_COL, 'status_col': HIGHEST_UP_CANDLE_STATUS_COL, 'is_multi_price': True},
+                {'name': 'High Volume', 'input_col': HIGH_VOL_RESULT_COL, 'status_col': HIGH_VOL_STATUS_COL, 'is_multi_price': True},
+                {'name': '3% Down', 'input_col': PCT_DOWN_RESULT_COL, 'status_col': PCT_DOWN_STATUS_COL, 'is_multi_price': True},
             ]
 
             for setup in setups:
@@ -1205,12 +1248,23 @@ def check_and_update_all_breakdown_statuses():
                         trigger_price = float(str(input_val_str).replace(',', '')) if input_val_str else None
                     except (ValueError, TypeError):
                         trigger_price = None
+                
+                # --- START: ADDED DEBUG LOGS ---
+                logger.info(f"[DEBUG Breakdown] Row {row} ({symbol}) | Setup: {setup['name']:<18} | Raw Input: '{input_val_str}' | Parsed Trigger Price: {trigger_price}")
+                # --- END: ADDED DEBUG LOGS ---
 
                 if trigger_price is None:
                     # If there's no valid input price, ensure the status is clear
                     if current_status.strip() != "":
+                        # --- START: ADDED DEBUG LOGS ---
+                        logger.info(f"[DEBUG Breakdown] Row {row} ({symbol}) | Action: Queuing CLEAR for {setup['status_col']} because trigger price is invalid.")
+                        # --- END: ADDED DEBUG LOGS ---
                         updates_queued.append({"range": f"{setup['status_col']}{row}", "values": [['']]})
                     continue
+
+                # --- START: ADDED DEBUG LOGS ---
+                logger.info(f"[DEBUG Breakdown] Row {row} ({symbol}) | Comparison: 15m Close ({last_close}) vs Trigger ({trigger_price})")
+                # --- END: ADDED DEBUG LOGS ---
 
                 # --- Core Breakdown and Clear Logic ---
                 new_status = ""
@@ -1220,6 +1274,10 @@ def check_and_update_all_breakdown_statuses():
 
                 # Queue update only if the status has changed
                 if new_status.strip() != current_status.strip():
+                    # --- START: ADDED DEBUG LOGS ---
+                    action_log = "WRITE 'Breakdown'" if new_status else "CLEAR"
+                    logger.info(f"[DEBUG Breakdown] Row {row} ({symbol}) | Action: Queuing {action_log} for {setup['status_col']}. (Old: '{current_status}', New: '{new_status}')")
+                    # --- END: ADDED DEBUG LOGS ---
                     updates_queued.append({"range": f"{setup['status_col']}{row}", "values": [[new_status]]})
 
     if updates_queued:
@@ -2843,6 +2901,3 @@ if __name__ == "__main__":
     run_threaded_logic()
     # The Flask app runs in the main thread to keep the service alive for deployment platforms.
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
-
-
-
