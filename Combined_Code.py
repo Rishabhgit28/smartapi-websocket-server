@@ -1155,17 +1155,23 @@ def process_orh_actions(token, buy_price, sl_base_price, trigger_time):
 # --- FIX: START: NEW UNIFIED FUNCTION FOR ALL BREAKDOWN STATUSES ---
 def _get_lowest_price_from_string(text_value):
     """
-    Helper function to parse a string like "110.50 (15 min), 105.20 (60 min)"
-    and return the lowest numerical value found.
+    MODIFIED: Helper function to parse a string like "110.50 (15 min), 105.20 (60 min)"
+    and return the lowest numerical price value found, ignoring numbers in parentheses.
     """
     if not text_value or not isinstance(text_value, str):
         return None
     try:
-        # Find all occurrences of numbers (including decimals) in the string
-        prices = re.findall(r'[0-9\.]+', text_value)
-        # Convert found strings to floats and return the minimum
+        prices = []
+        # Split the string by commas to handle multiple entries
+        parts = text_value.split(',')
+        for part in parts:
+            # Find the number at the beginning of the string part, ignoring parentheses content
+            match = re.match(r'^\s*([0-9\.]+)', part)
+            if match:
+                prices.append(float(match.group(1)))
+        
         if prices:
-            return min(float(p) for p in prices)
+            return min(prices)
     except (ValueError, TypeError):
         return None
     return None
@@ -2901,3 +2907,4 @@ if __name__ == "__main__":
     run_threaded_logic()
     # The Flask app runs in the main thread to keep the service alive for deployment platforms.
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
