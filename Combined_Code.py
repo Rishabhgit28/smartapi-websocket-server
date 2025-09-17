@@ -2,7 +2,7 @@
 # Combined Trading Dashboard and Signal Generator
 # Merges the functionality of smartWebSocketV2.py (live dashboard) and ORH.py (trade signal detection).
 # This single script provides real-time P&L tracking and simultaneously monitors for ORH and 3% Down setups.
-# VERSION: Concurrent (Threaded) with Advanced Order Status Tracking
+# VERSION: Concurrent (Threaded) with Advanced Order Status Tracking and Intraday Leaderboard
 # =====================================================================================================================
 
 # --- Core Python and System Imports ---
@@ -107,6 +107,9 @@ GOOGLE_SHEET_ID = '1cYBpsVKCbrYCZzrj8NAMEgUG4cXy5Q5r9BtQE1Cjmz0'
 DASHBOARD_SHEET_NAME = 'Dashboard'
 ATH_CACHE_SHEET_NAME = 'ATH Cache'
 ORDERS_SHEET_NAME = 'Orders'
+# --- START: NEW INTRADAY SETUP ---
+INTRADAY_SHEET_NAME = 'Intraday Dashboard'
+# --- END: NEW INTRADAY SETUP ---
 
 # --- Apps Script Web App URL for Instant Triggers ---
 APPS_SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzcz0XHBoAYMdAk9MX-_41Vq7hWX4flDVfHNDj0dP4CQKT7P-_rjWbT3tH2JnwENaeJ/exec" # <-- PASTE YOUR URL HERE
@@ -139,6 +142,9 @@ gsheet = None
 Dashboard = None
 ATHCache = None
 OrdersSheet = None
+# --- START: NEW INTRADAY SETUP ---
+IntradayDashboardSheet = None
+# --- END: NEW INTRADAY SETUP ---
 
 # --- Threading Lock for Data Safety ---
 data_lock = threading.Lock()
@@ -168,6 +174,13 @@ sell_triggered_today = set() # For hybrid Sell trigger
 previous_ah_column_state = {} # For manual Sell trigger
 previous_breakdown_state = {} # For dynamic auto-sell trigger
 # --- END: NEW STATE TRACKING ---
+
+# --- START: NEW INTRADAY SETUP ---
+# For Intraday Leaderboard Setup
+completed_5min_candles = collections.defaultdict(list)
+intraday_inside_candle_watchlist = {}  # Stores {'TOKEN': {'symbol': 'RELIANCE', 'exchange': 'NSE', 'pdh': 1500.0, 'pdl': 1480.0}}
+intraday_all_breakouts = [] # A list of dicts for all breakouts/downs found today.
+# --- END: NEW INTRADAY SETUP ---
 
 
 # For Subscription Management
@@ -259,6 +272,20 @@ CANDLE_INTERVAL_MAP_DISPLAY = {
 }
 
 SETUP_MAX_ROW = 17
+
+# --- START: NEW INTRADAY SETUP ---
+# For Intraday Leaderboard Setup
+INTRADAY_EXCH_COL = 'R'
+INTRADAY_SYMBOL_COL = 'S'
+INTRADAY_LTP_COL = 'T'
+INTRADAY_CHG_COL = 'U'
+INTRADAY_BREAKOUT_COL = 'V'
+INTRADAY_BREAKOUT_TIME_COL = 'W'
+INTRADAY_RANGE_COL = 'X'
+INTRADAY_CANDLE_TIME_COL = 'Y'
+INTRADAY_START_ROW = 5
+INTRADAY_MAX_LEADERS = 10
+# --- END: NEW INTRADAY SETUP ---
 
 # =====================================================================================================================
 #
@@ -651,9 +678,7 @@ class MyWebSocketClient(SmartWebSocketV2):
 
     def on_data(self, wsapp, data):
         """
-        This is the unified data handler. It processes each incoming tick for the live dashboard
-        and constructs candles for the ORH (3-min) setup.
-        MODIFIED: Now stores day's low from quote updates.
+        This is the unified data handler. It processes each incoming tick for all setups.
         """
         token = data.get('token')
         if not token:
@@ -675,14 +700,23 @@ class MyWebSocketClient(SmartWebSocketV2):
         current_time = get_ist_time()
         with data_lock:
             is_orh_token = token in excel_orh_setup_details
+            # --- START: NEW INTRADAY SETUP ---
+            is_intraday_token = token in intraday_inside_candle_watchlist
+            # --- END: NEW INTRADAY SETUP ---
 
         if is_orh_token and ltp_scaled is not None:
-            self._process_candle(token, ltp_scaled, current_time, 3, completed_3min_candles)
+            self._process_candle(token, ltp_scaled, current_time, 3, completed_3min_candles, "ORH")
 
-    def _process_candle(self, token, ltp, current_time, interval_minutes, completed_candle_storage):
+        # --- START: NEW INTRADAY SETUP ---
+        if is_intraday_token and ltp_scaled is not None:
+            self._process_candle(token, ltp_scaled, current_time, 5, completed_5min_candles, "Intraday")
+        # --- END: NEW INTRADAY SETUP ---
+
+
+    def _process_candle(self, token, ltp, current_time, interval_minutes, completed_candle_storage, setup_name):
         """
         Helper function to process a candle of a specific interval.
-        MODIFIED: Now triggers the event-driven ORH check upon candle completion.
+        MODIFIED: Now triggers checks based on setup_name upon candle completion.
         """
         interval_key = f'{interval_minutes}min'
         candle_info = interval_ohlc_data[token][interval_key]
@@ -700,18 +734,19 @@ class MyWebSocketClient(SmartWebSocketV2):
                 }
                 completed_candle_storage[token].append(completed_candle)
 
-                # --- START: MODIFIED SECTION FOR EVENT-DRIVEN ORH ---
-                # If this is a 3-minute candle, schedule the ORH check to run.
-                if interval_minutes == 3:
-                    # We only pass the token now, as the check function will fetch all candles.
+                # --- Trigger setup-specific logic ---
+                if setup_name == "ORH":
                     threading.Thread(target=schedule_orh_check, args=(token,), daemon=True).start()
-                # --- END: MODIFIED SECTION ---
+                # --- START: NEW INTRADAY SETUP ---
+                elif setup_name == "Intraday":
+                    threading.Thread(target=check_and_update_intraday_leaderboard, args=(token,), daemon=True).start()
+                # --- END: NEW INTRADAY SETUP ---
 
-                # Keep only the last 5 candles to manage memory
-                if len(completed_candle_storage[token]) > 5:
+                # Keep only a limited history to manage memory
+                if len(completed_candle_storage[token]) > 10:
                     completed_candle_storage[token].pop(0)
 
-                logger.info(f"Completed {interval_key} candle for {token}: O={completed_candle['open']:.2f}, H={completed_candle['high']:.2f}, L={completed_candle['low']:.2f}, C={completed_candle['close']:.2f}")
+                logger.info(f"Completed {interval_key} candle for {token} ({setup_name}): O={completed_candle['open']:.2f}, H={completed_candle['high']:.2f}, L={completed_candle['low']:.2f}, C={completed_candle['close']:.2f}")
 
             # Initialize the new candle
             candle_info.update({'open': ltp, 'high': ltp, 'low': ltp, 'start_time': candle_start_dt})
@@ -1415,6 +1450,238 @@ def check_and_update_price_volume_setups():
 
 # =====================================================================================================================
 #
+#                                --- START: NEW INTRADAY LEADERBOARD FUNCTIONS ---
+#
+# =====================================================================================================================
+def find_inside_candle_stocks():
+    """
+    Runs once pre-market to identify stocks that formed an inside candle on the previous trading day.
+    Populates the intraday_inside_candle_watchlist.
+    """
+    global intraday_inside_candle_watchlist
+    logger.info("[INTRADAY] Starting daily scan for inside candle patterns...")
+
+    # Determine the last two trading days
+    today = datetime.date.today()
+    trading_days = []
+    day_to_check = today - timedelta(days=1)
+    while len(trading_days) < 2:
+        if day_to_check.weekday() < 5:  # Monday to Friday
+            trading_days.append(day_to_check)
+        day_to_check -= timedelta(days=1)
+
+    to_date = trading_days[0]
+    from_date = trading_days[1]
+    from_date_str = from_date.strftime("%Y-%m-%d 00:00")
+    to_date_str = to_date.strftime("%Y-%m-%d 23:59")
+
+    # Get a list of all potential stocks from the ATH Cache for efficiency
+    try:
+        all_instruments = ATHCache.get_all_records()
+        logger.info(f"[INTRADAY] Scanning {len(all_instruments)} instruments from ATH Cache for inside candles.")
+    except Exception as e:
+        logger.error(f"[INTRADAY] Could not fetch instruments from ATH Cache: {e}")
+        return
+
+    temp_watchlist = {}
+    for instrument in all_instruments:
+        symbol = instrument.get('SYMBOL')
+        token = instrument.get('TOKEN')
+        if not symbol or not token or not str(symbol).endswith(('-EQ', '-BE')):
+            continue
+
+        try:
+            historic_param = {
+                "exchange": "NSE", "symboltoken": str(token), "interval": "ONE_DAY",
+                "fromdate": from_date_str, "todate": to_date_str
+            }
+            response = smart_api_obj.getCandleData(historic_param)
+
+            if response and response.get("status") and response.get("data") and len(response["data"]) == 2:
+                day_before_candle = response["data"][0]
+                yesterday_candle = response["data"][1]
+
+                day_before_high = day_before_candle[2]
+                day_before_low = day_before_candle[3]
+                yesterday_high = yesterday_candle[2]
+                yesterday_low = yesterday_candle[3]
+
+                # Inside Candle condition
+                if yesterday_high < day_before_high and yesterday_low > day_before_low:
+                    temp_watchlist[str(token)] = {
+                        'symbol': symbol,
+                        'exchange': 'NSE',
+                        'pdh': yesterday_high,
+                        'pdl': yesterday_low,
+                        'token': str(token)
+                    }
+            time.sleep(0.4) # API rate limiting
+        except DataException as e:
+            if "historical data is not available" in str(e).lower():
+                logger.warning(f"[INTRADAY] No historical data for {symbol}, skipping.")
+            else:
+                logger.error(f"[INTRADAY] API error for {symbol}: {e}")
+        except Exception as e:
+            logger.error(f"[INTRADAY] Exception while scanning {symbol}: {e}")
+
+    with data_lock:
+        intraday_inside_candle_watchlist = temp_watchlist
+    logger.info(f"[INTRADAY] Inside candle scan complete. Found {len(intraday_inside_candle_watchlist)} candidates for today.")
+
+    # Subscribe to tokens for the new watchlist
+    if intraday_inside_candle_watchlist:
+        tokens_to_subscribe = set(intraday_inside_candle_watchlist.keys()) - subscribed_tokens
+        if tokens_to_subscribe and smart_ws and smart_ws._is_connected_flag:
+            formatted_tokens = [{"exchangeType": 1, "tokens": list(tokens_to_subscribe)}] # exchangeType 1 for NSE
+            smart_ws.subscribe(f"sub_intraday_{int(time.time())}", smart_ws.QUOTE, formatted_tokens)
+            subscribed_tokens.update(tokens_to_subscribe)
+            logger.info(f"[INTRADAY] Subscribed to {len(tokens_to_subscribe)} new inside candle stocks.")
+
+def check_and_update_intraday_leaderboard(token):
+    """
+    Core logic for the intraday leaderboard. Triggered on every 5-min candle completion.
+    Checks for both upside and downside breakouts.
+    """
+    global intraday_all_breakouts
+    with data_lock:
+        # Don't process if this stock has already had its breakout event for the day
+        if any(leader['token'] == token for leader in intraday_all_breakouts):
+            return
+
+        candles = completed_5min_candles.get(token)
+        watchlist_details = intraday_inside_candle_watchlist.get(token)
+        if not candles or not watchlist_details:
+            return
+        
+        last_candle = candles[-1]
+        o, c = last_candle['open'], last_candle['close']
+        pdh, pdl = watchlist_details['pdh'], watchlist_details['pdl']
+        
+        if o == 0: return
+
+        breakout_type = None
+        if c > pdh:
+            breakout_type = "Upside"
+        elif c < pdl:
+            breakout_type = "Downside"
+        
+        if breakout_type:
+            candle_range_pct = ((c - o) / o) * 100
+            
+            logger.info(f"[INTRADAY] New {breakout_type} breakout for {watchlist_details['symbol']} with score {candle_range_pct:.2f}%.")
+            
+            new_entry = {
+                'token': token,
+                'exchange': watchlist_details['exchange'],
+                'symbol': watchlist_details['symbol'],
+                'breakout_type': breakout_type,
+                'breakout_time': last_candle['start_time'].strftime('%H:%M'),
+                'score': candle_range_pct,
+                'candle_time': last_candle['start_time'].strftime('%H:%M')
+            }
+            intraday_all_breakouts.append(new_entry)
+            
+            # Trigger sheet update in a separate thread to avoid blocking
+            threading.Thread(target=update_intraday_sheet, daemon=True).start()
+
+def update_intraday_sheet():
+    """
+    Clears and rewrites the Intraday Dashboard sheet with the Top 10 Upside and Top 10 Downside movers.
+    """
+    if not IntradayDashboardSheet: return
+
+    with data_lock:
+        all_breakouts_copy = list(intraday_all_breakouts)
+
+    # Separate into upside and downside lists
+    upside_movers = [b for b in all_breakouts_copy if b['breakout_type'] == 'Upside']
+    downside_movers = [b for b in all_breakouts_copy if b['breakout_type'] == 'Downside']
+
+    # Sort upside by score descending (highest positive score first)
+    upside_movers.sort(key=lambda x: x['score'], reverse=True)
+    # Sort downside by score ascending (most negative score first)
+    downside_movers.sort(key=lambda x: x['score'])
+
+    # Get the top 10 from each list
+    top_10_upside = upside_movers[:INTRADAY_MAX_LEADERS]
+    top_10_downside = downside_movers[:INTRADAY_MAX_LEADERS]
+
+    # Combine into a single list for writing
+    combined_list = top_10_upside + top_10_downside
+
+    try:
+        data_to_write = []
+        for leader in combined_list:
+            row_data = [
+                leader['exchange'],
+                leader['symbol'],
+                latest_tick_data.get(leader['token'], {}).get('ltp', ''),
+                latest_quote_data.get(leader['token'], {}).get('percentChange', ''),
+                leader['breakout_type'],
+                leader['breakout_time'],
+                leader['score'] / 100.0,
+                leader['candle_time']
+            ]
+            data_to_write.append(row_data)
+
+        # Clear a sufficient range for 20 entries
+        range_to_clear = f'{INTRADAY_EXCH_COL}{INTRADAY_START_ROW}:{INTRADAY_CANDLE_TIME_COL}{INTRADAY_START_ROW + (2 * INTRADAY_MAX_LEADERS)}'
+        IntradayDashboardSheet.batch_clear([range_to_clear])
+
+        if data_to_write:
+            range_to_write = f'{INTRADAY_EXCH_COL}{INTRADAY_START_ROW}'
+            IntradayDashboardSheet.update(range_to_write, data_to_write, value_input_option='USER_ENTERED')
+            logger.info(f"[INTRADAY] Wrote {len(data_to_write)} rows to Intraday Dashboard.")
+        else:
+            logger.info("[INTRADAY] Leaderboard is currently empty. Cleared sheet.")
+
+    except Exception as e:
+        logger.exception(f"[INTRADAY] Failed to update Intraday Dashboard sheet: {e}")
+
+def update_intraday_ltp_and_change():
+    """
+    Handles the fast, real-time updates for LTP and % Change on the Intraday Dashboard.
+    """
+    with data_lock:
+        # Re-create the sorted top 20 list to ensure row numbers are correct
+        all_breakouts_copy = list(intraday_all_breakouts)
+    
+    if not all_breakouts_copy:
+        return
+
+    upside = sorted([b for b in all_breakouts_copy if b['breakout_type'] == 'Upside'], key=lambda x: x['score'], reverse=True)[:INTRADAY_MAX_LEADERS]
+    downside = sorted([b for b in all_breakouts_copy if b['breakout_type'] == 'Downside'], key=lambda x: x['score'])[:INTRADAY_MAX_LEADERS]
+    
+    currently_displayed = upside + downside
+    if not currently_displayed:
+        return
+
+    updates = []
+    for i, leader in enumerate(currently_displayed):
+        row = INTRADAY_START_ROW + i
+        token = leader['token']
+        
+        ltp = latest_tick_data.get(token, {}).get('ltp')
+        pct_change = latest_quote_data.get(token, {}).get('percentChange')
+        
+        if ltp is not None:
+            updates.append({'range': f'{INTRADAY_LTP_COL}{row}', 'values': [[ltp]]})
+        if pct_change is not None:
+            updates.append({'range': f'{INTRADAY_CHG_COL}{row}', 'values': [[pct_change / 100.0]]})
+
+    if updates and IntradayDashboardSheet:
+        try:
+            IntradayDashboardSheet.batch_update(updates, value_input_option='USER_ENTERED')
+        except Exception as e:
+            logger.warning(f"[INTRADAY] Failed to batch update live data: {e}")
+# =====================================================================================================================
+#
+#                                --- END: NEW INTRADAY LEADERBOARD FUNCTIONS ---
+#
+# =====================================================================================================================
+
+# =====================================================================================================================
+#
 #                                --- START: NEW ORDER TRACKING LOGIC BASED ON DOCUMENT ---
 #
 # =====================================================================================================================
@@ -1949,7 +2216,7 @@ def scan_sheet_for_all_symbols(Dashboard, ATHCache):
 
 def update_excel_live_data():
     """
-    Updates the Google Sheet with live data and the new Swing Low calculation.
+    Updates the Google Sheet with live data for all setups.
     """
     global cells_to_clear_color
 
@@ -1960,6 +2227,11 @@ def update_excel_live_data():
     if not smart_ws or not smart_ws._is_connected_flag:
         logger.warning("WebSocket not connected. Skipping Google Sheet update.")
         return
+
+    # --- START: NEW INTRADAY SETUP ---
+    # Handle fast updates for the Intraday dashboard separately
+    update_intraday_ltp_and_change()
+    # --- END: NEW INTRADAY SETUP ---
 
     requests = []
     GREEN_COLOR, RED_COLOR = (149, 203, 186), (254, 112, 112)
@@ -2215,6 +2487,11 @@ def re_authenticate_and_reconnect():
         subscribe_list_grouped = collections.defaultdict(list)
         with data_lock:
              all_details = {**excel_dashboard_details, **excel_orh_setup_details, **excel_3pct_setup_details}
+             # --- START: NEW INTRADAY SETUP ---
+             # Also consider intraday watchlist for re-subscription
+             intraday_tokens = set(intraday_inside_candle_watchlist.keys())
+             tokens_to_resubscribe.update(intraday_tokens)
+             # --- END: NEW INTRADAY SETUP ---
 
         for token in tokens_to_resubscribe:
             exchange_type_num = 1 # Default to NSE
@@ -2224,6 +2501,10 @@ def re_authenticate_and_reconnect():
                      exchange_type_num = {'NSE': 1, 'NFO': 2, 'BSE': 3}.get(entry.get('exchange', 'NSE').upper(), 1)
                 elif 'exchange_type' in entry:
                      exchange_type_num = entry.get('exchange_type', 1)
+            # --- START: NEW INTRADAY SETUP ---
+            elif token in intraday_inside_candle_watchlist:
+                 exchange_type_num = 1 # Intraday setup is NSE only
+            # --- END: NEW INTRADAY SETUP ---
             subscribe_list_grouped[exchange_type_num].append(token)
 
         for ex_type, tokens in subscribe_list_grouped.items():
@@ -2257,9 +2538,13 @@ def run_daily_reauthentication_manager():
                 success = re_authenticate_and_reconnect()
                 if success:
                     last_login_date = today_ist
+                    # --- START: NEW INTRADAY SETUP ---
+                    # After successful re-login, run the inside candle scan for the new day
+                    threading.Thread(target=find_inside_candle_stocks, daemon=True).start()
+                    # --- END: NEW INTRADAY SETUP ---
                 else:
                     logger.error("Daily re-authentication failed. Will retry tomorrow.")
-                    last_login_date = today_ist
+                    last_login_date = today_ist # Mark as attempted to avoid retrying today
 
             time.sleep(60)
         except Exception as e:
@@ -2293,21 +2578,32 @@ def run_quote_updater():
         try:
             with data_lock:
                 dashboard_details_copy = excel_dashboard_details.copy()
+                # --- START: NEW INTRADAY SETUP ---
+                all_breakouts_copy = list(intraday_all_breakouts)
+                # --- END: NEW INTRADAY SETUP ---
 
-            focus_list_tokens = {}
+            all_tokens_to_fetch = {}
+            # From main dashboard focus list
             for token, details_list in dashboard_details_copy.items():
                 for details in details_list:
                     if details.get('block_type') == 'Focus List':
                         exchange_name = details.get("exchange", "NSE").upper()
-                        focus_list_tokens[token] = exchange_name
+                        all_tokens_to_fetch[token] = exchange_name
                         break
+            
+            # --- START: NEW INTRADAY SETUP ---
+            # From intraday leaderboard
+            for item in all_breakouts_copy:
+                if item['token'] not in all_tokens_to_fetch:
+                    all_tokens_to_fetch[item['token']] = item['exchange'].upper()
+            # --- END: NEW INTRADAY SETUP ---
 
-            if not focus_list_tokens:
+            if not all_tokens_to_fetch:
                 time.sleep(5)
                 continue
 
             tokens_by_exchange = collections.defaultdict(list)
-            for token, exchange in focus_list_tokens.items():
+            for token, exchange in all_tokens_to_fetch.items():
                 tokens_by_exchange[exchange].append(token)
 
             new_quote_data = {}
@@ -2792,7 +3088,7 @@ def start_main_application():
     The primary function that initializes connections and runs the main processing loop.
     """
     # --- FIX: All session-related variables are now global to be managed by the re-auth process ---
-    global smart_api_obj, smart_ws, gsheet, Dashboard, ATHCache, OrdersSheet, subscribed_tokens
+    global smart_api_obj, smart_ws, gsheet, Dashboard, ATHCache, OrdersSheet, subscribed_tokens, IntradayDashboardSheet
     global excel_dashboard_details, excel_orh_setup_details, excel_3pct_setup_details, instrument_master_list
     global auth_token, feed_token, websocket_thread, last_login_date
 
@@ -2816,6 +3112,9 @@ def start_main_application():
         Dashboard = gsheet.worksheet(DASHBOARD_SHEET_NAME)
         ATHCache = gsheet.worksheet(ATH_CACHE_SHEET_NAME)
         OrdersSheet = gsheet.worksheet(ORDERS_SHEET_NAME)
+        # --- START: NEW INTRADAY SETUP ---
+        IntradayDashboardSheet = gsheet.worksheet(INTRADAY_SHEET_NAME)
+        # --- END: NEW INTRADAY SETUP ---
         logger.info("Google Sheets connected successfully.")
     except Exception as e:
         logger.error(f"Error connecting to Google Sheets: {e}. Please check credentials and sheet names. Exiting.")
@@ -2853,6 +3152,14 @@ def start_main_application():
         fetch_monthly_highs(smart_api_obj, unique_tokens_3pct_startup)
     sort_full_positions()
 
+    # --- START: NEW INTRADAY SETUP ---
+    # Perform the inside candle scan at startup
+    find_inside_candle_stocks()
+    with data_lock:
+        intraday_tokens = set(intraday_inside_candle_watchlist.keys())
+        all_tokens_for_subscription.update(intraday_tokens)
+    # --- END: NEW INTRADAY SETUP ---
+
     try:
         logger.info("Initializing SmartAPI WebSocket...")
         smart_ws = MyWebSocketClient(auth_token, API_KEY, CLIENT_CODE, feed_token)
@@ -2876,6 +3183,7 @@ def start_main_application():
             if token in excel_dashboard_details and excel_dashboard_details[token]: exchange_type_num = {'NSE': 1, 'NFO': 2, 'BSE': 3}.get(excel_dashboard_details[token][0].get('exchange', 'NSE').upper(), 1)
             elif token in excel_orh_setup_details and excel_orh_setup_details[token]: exchange_type_num = excel_orh_setup_details[token][0].get('exchange_type', 1)
             elif token in excel_3pct_setup_details and excel_3pct_setup_details[token]: exchange_type_num = excel_3pct_setup_details[token][0].get('exchange_type', 1)
+            elif token in intraday_inside_candle_watchlist: exchange_type_num = 1
             subscribe_list_grouped[exchange_type_num].append(token)
 
         for ex_type, tokens in subscribe_list_grouped.items():
