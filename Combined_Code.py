@@ -2677,7 +2677,10 @@ def run_background_task_scheduler(initial_data_ready_event):
                         if details: all_tokens_for_history.add((token, details[0]['exchange_type']))
                     unique_tokens_for_history = list(all_tokens_for_history)
 
-                if current_minute % 15 == 1 and current_minute != last_checked_minute_15min:
+                # --- START: MODIFIED SECTION ---
+                # Added a time check to ensure automated breakdown analysis only starts after 9:30 AM.
+                if current_minute % 15 == 1 and current_minute != last_checked_minute_15min and now.time() >= datetime.time(9, 30):
+                # --- END: MODIFIED SECTION ---
                     fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_for_history, 'FIFTEEN_MINUTE')
                     check_and_update_price_volume_setups()
                     check_and_update_all_breakdown_statuses() # <-- FIX: Replaced old function
@@ -2978,4 +2981,3 @@ if __name__ == "__main__":
     run_threaded_logic()
     # The Flask app runs in the main thread to keep the service alive for deployment platforms.
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
-
