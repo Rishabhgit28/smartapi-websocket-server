@@ -1190,11 +1190,15 @@ def _get_lowest_price_from_string(text_value):
 def check_and_update_all_breakdown_statuses():
     """
     A single, unified function to check and update the status columns for all breakdown conditions
-    (AA, AC, AE, AG) based on the 15-minute candle close. It also handles clearing the status.
-    This function replaces the old check_and_update_trailing_stop_status.
+    (AA, AC, AE, AG) based on the 15-minute candle close. It also handles clearing the status
+    and coloring the background red on breakdown.
     """
     logger.info("Checking all breakdown statuses based on 15-min close...")
-    updates_queued = []
+    # --- START: MODIFIED SECTION ---
+    requests_queued = []
+    RED_COLOR = (254, 112, 112)
+    dashboard_sheet_id = Dashboard.id
+    # --- END: MODIFIED SECTION ---
 
     with data_lock:
         setup_details_copy = excel_3pct_setup_details.copy()
@@ -1266,44 +1270,44 @@ def check_and_update_all_breakdown_statuses():
                     except (ValueError, TypeError):
                         trigger_price = None
                 
-                # --- START: ADDED DEBUG LOGS ---
-                logger.info(f"[DEBUG Breakdown] Row {row} ({symbol}) | Setup: {setup['name']:<18} | Raw Input: '{input_val_str}' | Parsed Trigger Price: {trigger_price}")
-                # --- END: ADDED DEBUG LOGS ---
-
                 if trigger_price is None:
                     # If there's no valid input price, ensure the status is clear
                     if current_status.strip() != "":
-                        # --- START: ADDED DEBUG LOGS ---
-                        logger.info(f"[DEBUG Breakdown] Row {row} ({symbol}) | Action: Queuing CLEAR for {setup['status_col']} because trigger price is invalid.")
-                        # --- END: ADDED DEBUG LOGS ---
-                        updates_queued.append({"range": f"{setup['status_col']}{row}", "values": [['']]})
+                        # --- START: MODIFIED SECTION ---
+                        cell_range = {"sheetId": dashboard_sheet_id, "startRowIndex": row - 1, "endRowIndex": row, "startColumnIndex": col_to_num(setup['status_col']) - 1, "endColumnIndex": col_to_num(setup['status_col'])}
+                        cell_data = {"userEnteredValue": {"stringValue": ""}, "userEnteredFormat": {"backgroundColor": rgb_to_float(None)}}
+                        fields = "userEnteredValue,userEnteredFormat.backgroundColor"
+                        requests_queued.append({"updateCells": {"rows": [{"values": [cell_data]}], "fields": fields, "range": cell_range}})
+                        # --- END: MODIFIED SECTION ---
                     continue
-
-                # --- START: ADDED DEBUG LOGS ---
-                logger.info(f"[DEBUG Breakdown] Row {row} ({symbol}) | Comparison: 15m Close ({last_close}) vs Trigger ({trigger_price})")
-                # --- END: ADDED DEBUG LOGS ---
 
                 # --- Core Breakdown and Clear Logic ---
                 new_status = ""
                 if last_close < trigger_price:
                     new_status = "Breakdown"
-                # If the current status is "Breakdown" and price recovers, new_status remains "" (clear)
-
+                
                 # Queue update only if the status has changed
                 if new_status.strip() != current_status.strip():
-                    # --- START: ADDED DEBUG LOGS ---
-                    action_log = "WRITE 'Breakdown'" if new_status else "CLEAR"
-                    logger.info(f"[DEBUG Breakdown] Row {row} ({symbol}) | Action: Queuing {action_log} for {setup['status_col']}. (Old: '{current_status}', New: '{new_status}')")
-                    # --- END: ADDED DEBUG LOGS ---
-                    updates_queued.append({"range": f"{setup['status_col']}{row}", "values": [[new_status]]})
+                    # --- START: MODIFIED SECTION ---
+                    cell_range = {"sheetId": dashboard_sheet_id, "startRowIndex": row - 1, "endRowIndex": row, "startColumnIndex": col_to_num(setup['status_col']) - 1, "endColumnIndex": col_to_num(setup['status_col'])}
+                    
+                    if new_status == "Breakdown":
+                        bg_color = RED_COLOR
+                    else:
+                        bg_color = None # Reset to default color
 
-    if updates_queued:
-        Dashboard.batch_update(updates_queued, value_input_option='USER_ENTERED')
-        logger.info(f"Applied {len(updates_queued)} dynamic breakdown status updates to Dashboard.")
+                    cell_data = {"userEnteredValue": {"stringValue": new_status}, "userEnteredFormat": {"backgroundColor": rgb_to_float(bg_color)}}
+                    fields = "userEnteredValue,userEnteredFormat.backgroundColor"
+                    requests_queued.append({"updateCells": {"rows": [{"values": [cell_data]}], "fields": fields, "range": cell_range}})
+                    # --- END: MODIFIED SECTION ---
+
+    # --- START: MODIFIED SECTION ---
+    if requests_queued:
+        gsheet.batch_update({'requests': requests_queued})
+        logger.info(f"Applied {len(requests_queued)} dynamic breakdown status updates (with color) to Dashboard.")
     else:
         logger.info("No dynamic breakdown status updates were needed.")
-# --- FIX: END: NEW UNIFIED FUNCTION ---
-
+    # --- END: MODIFIED SECTION ---
 
 def check_and_update_price_volume_setups():
     """
@@ -2374,7 +2378,7 @@ def run_initial_setup_data_fetch(initial_data_ready_event):
     """
     This function now runs in a dedicated thread to fetch all historical data
     for the setups without blocking the main application startup.
-    MODIFIED: Signals an event when complete.
+    MODIFIED: It no longer runs the breakdown checks immediately after fetching.
     """
     logger.info("Starting background fetch for initial setup data...")
     try:
@@ -2403,13 +2407,13 @@ def run_initial_setup_data_fetch(initial_data_ready_event):
         for interval_api in CANDLE_INTERVALS_3PCT_API:
             fetch_historical_candles_for_3pct_down(smart_api_obj, unique_tokens_for_history, interval_api)
 
-        # After initial fetch, run the checks
-        check_and_update_price_volume_setups()
-        # --- FIX: Call the new unified breakdown checker ---
-        check_and_update_all_breakdown_statuses()
-        check_and_update_breakdown_status()
+        # --- START: MODIFIED SECTION ---
+        # The breakdown checks are now removed from this initial fetch function.
+        # They will be handled exclusively by the run_background_task_scheduler
+        # to ensure they only run on a synchronized 15-minute interval.
+        logger.info("Initial data fetch is complete. Handing over to the scheduler for timed checks.")
+        # --- END: MODIFIED SECTION ---
 
-        logger.info("Background fetch for initial setup data complete.")
     except Exception as e:
         logger.exception(f"An error occurred during initial data fetch: {e}")
     finally:
@@ -2981,3 +2985,4 @@ if __name__ == "__main__":
     run_threaded_logic()
     # The Flask app runs in the main thread to keep the service alive for deployment platforms.
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
