@@ -72,19 +72,17 @@ log_path = os.path.join(log_folder_path, "app.log")
 # This will keep the 3 most recent log files, each up to 1MB in size.
 logzero.logfile(log_path, maxBytes=1e6, backupCount=3, encoding='utf-8')
 
-# --- START: MODIFIED SECTION FOR DEBUGGING ---
-# 2. Configure the default logger (which includes the console) and set the global logging level to DEBUG.
-logzero.setup_default_logger(level=logging.DEBUG)
+# 2. Configure the default logger (which includes the console) and set the global logging level.
+logzero.setup_default_logger(level=logging.INFO)
 
 
 # Explicitly add a StreamHandler for console output to ensure messages are always visible.
 if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.DEBUG) # Set console to DEBUG level
+    console_handler.setLevel(logging.INFO)
     formatter = logging.Formatter('[%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s')
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
-# --- END: MODIFIED SECTION FOR DEBUGGING ---
 
 # --- Flask Health Check Route ---
 @app.route('/ping')
@@ -1151,11 +1149,13 @@ def _get_lowest_price_from_string(text_value):
 # =====================================================================================================================
 def check_and_update_all_breakdown_statuses():
     """
-    MODIFIED: A single function to update status columns (AA, AC, AE, AG).
-    If the 15-min candle closes below a trigger level AND occurs after the trigger candle's timestamp,
-    it writes "Yes (Timestamp)" and colors the cell red. If the price recovers, it clears the cell.
+    MODIFIED: This function is the complete state machine for breakdown statuses.
+    1. Finds the *first* 15-min candle that breaks down after a trigger.
+    2. Writes the status with the correct timestamp.
+    3. Maintains the status as long as the price is still below the level.
+    4. Clears the status automatically if the price recovers.
     """
-    logger.info("Checking all breakdown statuses based on 15-min close...")
+    logger.info("Checking all breakdown statuses (state machine)...")
     requests_queued = []
     RED_COLOR = (254, 112, 112)
     dashboard_sheet_id = Dashboard.id
@@ -1169,6 +1169,7 @@ def check_and_update_all_breakdown_statuses():
         return
 
     try:
+        # Define all columns to read from the sheet in one go
         cols_to_read = [
             TRAILING_STOP_INPUT_COL, TRAILING_STOP_STATUS_COL,
             HIGHEST_UP_CANDLE_COL, HIGHEST_UP_CANDLE_STATUS_COL,
@@ -1200,13 +1201,10 @@ def check_and_update_all_breakdown_statuses():
         if not candle_history:
             continue
 
-        last_candle = candle_history[-1]
-        last_close = last_candle['close']
-        last_candle_time = last_candle['start_time']
+        last_close = candle_history[-1]['close']
 
         for entry in symbol_entries:
             row, row_idx = entry["row"], entry["row"] - START_ROW_DATA
-            symbol_name = entry.get('symbol', 'Unknown') # For logging
 
             setups = [
                 {'name': 'Trailing Stop', 'input_col': TRAILING_STOP_INPUT_COL, 'status_col': TRAILING_STOP_STATUS_COL, 'is_multi_price': False, 'key': 'trailing_stop'},
@@ -1216,7 +1214,6 @@ def check_and_update_all_breakdown_statuses():
             ]
 
             for setup in setups:
-                logger.debug(f"DEBUG [{symbol_name}]: --- Checking '{setup['key']}' breakdown for row {row} ---")
                 input_val_str = get_sheet_value(row_idx, setup['input_col'])
                 current_status = get_sheet_value(row_idx, setup['status_col'])
                 trigger_price = None
@@ -1229,54 +1226,45 @@ def check_and_update_all_breakdown_statuses():
                     except (ValueError, TypeError):
                         trigger_price = None
 
+                # If no trigger price, ensure the status cell is clear.
                 if trigger_price is None:
                     if current_status.strip() != "":
-                        cell_range = {"sheetId": dashboard_sheet_id, "startRowIndex": row - 1, "endRowIndex": row, "startColumnIndex": col_to_num(setup['status_col']) - 1, "endColumnIndex": col_to_num(setup['status_col'])}
-                        cell_data = {"userEnteredValue": {"stringValue": ""}, "userEnteredFormat": {"backgroundColor": rgb_to_float(None)}}
-                        fields = "userEnteredValue,userEnteredFormat.backgroundColor"
-                        requests_queued.append({"updateCells": {"rows": [{"values": [cell_data]}], "fields": fields, "range": cell_range}})
+                        requests_queued.append({"updateCells": {"rows": [{"values": [{"userEnteredValue": {"stringValue": ""}, "userEnteredFormat": {"backgroundColor": rgb_to_float(None)}}]}], "fields": "userEnteredValue,userEnteredFormat.backgroundColor", "range": {"sheetId": dashboard_sheet_id, "startRowIndex": row - 1, "endRowIndex": row, "startColumnIndex": col_to_num(setup['status_col']) - 1, "endColumnIndex": col_to_num(setup['status_col'])}}})
                     continue
 
-                is_breakdown_valid = False
-                # --- START: MODIFIED LOGIC WITH TIME CHECK AND DEBUGGING ---
-                if setup['key'] == 'trailing_stop':
-                    logger.debug(f"DEBUG [{symbol_name}]: TRAILING STOP TRIGGER -> Price: {trigger_price}")
-                    logger.debug(f"DEBUG [{symbol_name}]: CURRENT 15m CANDLE -> Close: {last_close}")
-                    price_check_result = last_close < trigger_price
-                    logger.debug(f"DEBUG [{symbol_name}]: Price Check: Is {last_close} < {trigger_price}? -> {price_check_result}")
-                    if price_check_result:
-                        is_breakdown_valid = True
-                        logger.debug(f"DEBUG [{symbol_name}]: Result: Breakdown is VALID.")
-                    else:
-                        logger.debug(f"DEBUG [{symbol_name}]: Result: Breakdown INVALID (Price condition not met).")
-                else:
-                    trigger_info = timestamps_cache_copy.get((token, setup['key']))
-                    logger.debug(f"DEBUG [{symbol_name}]: CACHED TRIGGER -> {trigger_info}")
-                    logger.debug(f"DEBUG [{symbol_name}]: CURRENT 15m CANDLE -> Close: {last_close} | Time: {last_candle_time}")
-
-                    if trigger_info and trigger_price == trigger_info.get('price'):
-                        trigger_time = trigger_info.get('timestamp')
-                        time_check_result = last_candle_time > trigger_time if trigger_time else False
-                        price_check_result = last_close < trigger_price
-                        logger.debug(f"DEBUG [{symbol_name}]: Time Check: Is {last_candle_time} > {trigger_time}? -> {time_check_result}")
-                        logger.debug(f"DEBUG [{symbol_name}]: Price Check: Is {last_close} < {trigger_price}? -> {price_check_result}")
-
-                        if trigger_time and time_check_result and price_check_result:
-                            is_breakdown_valid = True
-                            logger.debug(f"DEBUG [{symbol_name}]: Result: Breakdown is VALID.")
-                        else:
-                            reason = "Time condition not met" if not time_check_result else "Price condition not met"
-                            logger.debug(f"DEBUG [{symbol_name}]: Result: Breakdown INVALID ({reason}).")
-                    else:
-                        logger.debug(f"DEBUG [{symbol_name}]: Result: Breakdown INVALID (No matching trigger info in cache).")
-
-                # --- END: MODIFIED LOGIC WITH TIME CHECK AND DEBUGGING ---
-
+                # --- START: NEW STATE MACHINE LOGIC ---
                 new_status = ""
-                if is_breakdown_valid:
-                    formatted_time = last_candle_time.strftime('%d %B, %I:%M %p')
-                    new_status = f"Yes ({formatted_time})"
 
+                # 1. Check for Recovery: If status is "Yes" but price is now above trigger, clear it.
+                if current_status.strip().startswith("Yes"):
+                    if last_close >= trigger_price:
+                        new_status = "" # This will trigger a clear operation below
+                    else:
+                        new_status = current_status # Price is still below, so keep the existing status
+                
+                # 2. Check for New Breakdown: If status is empty, search for the first breakdown candle.
+                else:
+                    first_breakdown_candle = None
+                    if setup['key'] == 'trailing_stop':
+                        for candle in candle_history:
+                            if candle['close'] < trigger_price:
+                                first_breakdown_candle = candle
+                                break
+                    else:
+                        trigger_info = timestamps_cache_copy.get((token, setup['key']))
+                        if trigger_info and trigger_price == trigger_info.get('price'):
+                            trigger_time = trigger_info.get('timestamp')
+                            if trigger_time:
+                                for candle in candle_history:
+                                    if candle['start_time'] > trigger_time and candle['close'] < trigger_price:
+                                        first_breakdown_candle = candle
+                                        break
+                    
+                    if first_breakdown_candle:
+                        formatted_time = first_breakdown_candle['start_time'].strftime('%d %b, %I:%M %p')
+                        new_status = f"Yes ({formatted_time})"
+
+                # 3. Update Sheet if State Has Changed
                 if new_status.strip() != current_status.strip():
                     cell_range = {"sheetId": dashboard_sheet_id, "startRowIndex": row - 1, "endRowIndex": row, "startColumnIndex": col_to_num(setup['status_col']) - 1, "endColumnIndex": col_to_num(setup['status_col'])}
                     bg_color = RED_COLOR if new_status.startswith("Yes") else None
@@ -1284,11 +1272,14 @@ def check_and_update_all_breakdown_statuses():
                     fields = "userEnteredValue,userEnteredFormat.backgroundColor"
                     requests_queued.append({"updateCells": {"rows": [{"values": [cell_data]}], "fields": fields, "range": cell_range}})
 
+                # --- END: NEW STATE MACHINE LOGIC ---
+
     if requests_queued:
         gsheet.batch_update({'requests': requests_queued})
-        logger.info(f"Applied {len(requests_queued)} dynamic breakdown status updates (with color) to Dashboard.")
+        logger.info(f"Applied {len(requests_queued)} dynamic breakdown status updates to Dashboard.")
     else:
         logger.info("No dynamic breakdown status updates were needed.")
+
 # =====================================================================================================================
 # --- END: MODIFIED SECTION ---
 # =====================================================================================================================
@@ -1470,21 +1461,16 @@ def check_and_update_price_volume_setups():
         if ts_3pct:
             with data_lock:
                 trigger_candle_timestamps[(token, '3pct_down')] = {'price': price_3pct, 'timestamp': ts_3pct}
-            logger.debug(f"DEBUG [{symbol_name}]: Caching trigger for '3pct_down'. Price: {price_3pct}, Timestamp: {ts_3pct}")
-
 
         final_output_high_vol, price_hv, ts_hv = format_consolidated_output(high_vol_candles)
         if ts_hv:
             with data_lock:
                 trigger_candle_timestamps[(token, 'high_vol')] = {'price': price_hv, 'timestamp': ts_hv}
-            logger.debug(f"DEBUG [{symbol_name}]: Caching trigger for 'high_vol'. Price: {price_hv}, Timestamp: {ts_hv}")
-
 
         final_output_highest_up, price_hu, ts_hu = format_consolidated_output(highest_up_candles)
         if ts_hu:
             with data_lock:
                 trigger_candle_timestamps[(token, 'highest_up')] = {'price': price_hu, 'timestamp': ts_hu}
-            logger.debug(f"DEBUG [{symbol_name}]: Caching trigger for 'highest_up'. Price: {price_hu}, Timestamp: {ts_hu}")
 
 
         for entry in symbol_entries:
