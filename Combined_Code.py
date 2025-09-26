@@ -72,17 +72,19 @@ log_path = os.path.join(log_folder_path, "app.log")
 # This will keep the 3 most recent log files, each up to 1MB in size.
 logzero.logfile(log_path, maxBytes=1e6, backupCount=3, encoding='utf-8')
 
-# 2. Configure the default logger (which includes the console) and set the global logging level.
-logzero.setup_default_logger(level=logging.INFO)
+# --- START: MODIFIED SECTION FOR DEBUGGING ---
+# 2. Configure the default logger (which includes the console) and set the global logging level to DEBUG.
+logzero.setup_default_logger(level=logging.DEBUG)
 
 
 # Explicitly add a StreamHandler for console output to ensure messages are always visible.
 if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.DEBUG) # Set console to DEBUG level
     formatter = logging.Formatter('[%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s')
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
+# --- END: MODIFIED SECTION FOR DEBUGGING ---
 
 # --- Flask Health Check Route ---
 @app.route('/ping')
@@ -1204,6 +1206,7 @@ def check_and_update_all_breakdown_statuses():
 
         for entry in symbol_entries:
             row, row_idx = entry["row"], entry["row"] - START_ROW_DATA
+            symbol_name = entry.get('symbol', 'Unknown') # For logging
 
             setups = [
                 {'name': 'Trailing Stop', 'input_col': TRAILING_STOP_INPUT_COL, 'status_col': TRAILING_STOP_STATUS_COL, 'is_multi_price': False, 'key': 'trailing_stop'},
@@ -1213,6 +1216,7 @@ def check_and_update_all_breakdown_statuses():
             ]
 
             for setup in setups:
+                logger.debug(f"DEBUG [{symbol_name}]: --- Checking '{setup['key']}' breakdown for row {row} ---")
                 input_val_str = get_sheet_value(row_idx, setup['input_col'])
                 current_status = get_sheet_value(row_idx, setup['status_col'])
                 trigger_price = None
@@ -1234,19 +1238,39 @@ def check_and_update_all_breakdown_statuses():
                     continue
 
                 is_breakdown_valid = False
-                # --- START: MODIFIED LOGIC WITH TIME CHECK ---
+                # --- START: MODIFIED LOGIC WITH TIME CHECK AND DEBUGGING ---
                 if setup['key'] == 'trailing_stop':
-                    # Trailing stop is purely price-based, no time check needed.
-                    if last_close < trigger_price:
+                    logger.debug(f"DEBUG [{symbol_name}]: TRAILING STOP TRIGGER -> Price: {trigger_price}")
+                    logger.debug(f"DEBUG [{symbol_name}]: CURRENT 15m CANDLE -> Close: {last_close}")
+                    price_check_result = last_close < trigger_price
+                    logger.debug(f"DEBUG [{symbol_name}]: Price Check: Is {last_close} < {trigger_price}? -> {price_check_result}")
+                    if price_check_result:
                         is_breakdown_valid = True
+                        logger.debug(f"DEBUG [{symbol_name}]: Result: Breakdown is VALID.")
+                    else:
+                        logger.debug(f"DEBUG [{symbol_name}]: Result: Breakdown INVALID (Price condition not met).")
                 else:
-                    # For other setups, check both price and time.
                     trigger_info = timestamps_cache_copy.get((token, setup['key']))
+                    logger.debug(f"DEBUG [{symbol_name}]: CACHED TRIGGER -> {trigger_info}")
+                    logger.debug(f"DEBUG [{symbol_name}]: CURRENT 15m CANDLE -> Close: {last_close} | Time: {last_candle_time}")
+
                     if trigger_info and trigger_price == trigger_info.get('price'):
                         trigger_time = trigger_info.get('timestamp')
-                        if trigger_time and last_close < trigger_price and last_candle_time > trigger_time:
+                        time_check_result = last_candle_time > trigger_time if trigger_time else False
+                        price_check_result = last_close < trigger_price
+                        logger.debug(f"DEBUG [{symbol_name}]: Time Check: Is {last_candle_time} > {trigger_time}? -> {time_check_result}")
+                        logger.debug(f"DEBUG [{symbol_name}]: Price Check: Is {last_close} < {trigger_price}? -> {price_check_result}")
+
+                        if trigger_time and time_check_result and price_check_result:
                             is_breakdown_valid = True
-                # --- END: MODIFIED LOGIC WITH TIME CHECK ---
+                            logger.debug(f"DEBUG [{symbol_name}]: Result: Breakdown is VALID.")
+                        else:
+                            reason = "Time condition not met" if not time_check_result else "Price condition not met"
+                            logger.debug(f"DEBUG [{symbol_name}]: Result: Breakdown INVALID ({reason}).")
+                    else:
+                        logger.debug(f"DEBUG [{symbol_name}]: Result: Breakdown INVALID (No matching trigger info in cache).")
+
+                # --- END: MODIFIED LOGIC WITH TIME CHECK AND DEBUGGING ---
 
                 new_status = ""
                 if is_breakdown_valid:
@@ -1423,6 +1447,7 @@ def check_and_update_price_volume_setups():
         three_pct_down_candles = {}
         high_vol_candles = {}
         highest_up_candles = {}
+        symbol_name = symbol_entries[0]['symbol'] if symbol_entries else 'Unknown' # For logging
 
         for interval_api in CANDLE_INTERVALS_3PCT_API:
             candle_history = volume_history_copy.get(token, {}).get(interval_api)
@@ -1445,16 +1470,22 @@ def check_and_update_price_volume_setups():
         if ts_3pct:
             with data_lock:
                 trigger_candle_timestamps[(token, '3pct_down')] = {'price': price_3pct, 'timestamp': ts_3pct}
+            logger.debug(f"DEBUG [{symbol_name}]: Caching trigger for '3pct_down'. Price: {price_3pct}, Timestamp: {ts_3pct}")
+
 
         final_output_high_vol, price_hv, ts_hv = format_consolidated_output(high_vol_candles)
         if ts_hv:
             with data_lock:
                 trigger_candle_timestamps[(token, 'high_vol')] = {'price': price_hv, 'timestamp': ts_hv}
+            logger.debug(f"DEBUG [{symbol_name}]: Caching trigger for 'high_vol'. Price: {price_hv}, Timestamp: {ts_hv}")
+
 
         final_output_highest_up, price_hu, ts_hu = format_consolidated_output(highest_up_candles)
         if ts_hu:
             with data_lock:
                 trigger_candle_timestamps[(token, 'highest_up')] = {'price': price_hu, 'timestamp': ts_hu}
+            logger.debug(f"DEBUG [{symbol_name}]: Caching trigger for 'highest_up'. Price: {price_hu}, Timestamp: {ts_hu}")
+
 
         for entry in symbol_entries:
             row, row_idx = entry["row"], entry["row"] - 1
@@ -2692,3 +2723,4 @@ if __name__ == "__main__":
     run_threaded_logic()
     # The Flask app runs in the main thread to keep the service alive for deployment platforms.
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
