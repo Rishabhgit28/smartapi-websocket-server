@@ -68,11 +68,11 @@ log_path = os.path.join(log_folder_path, "app.log")
 
 # FIX: Configure file logger and console logger separately for compatibility.
 
-# 1. Configure a rotating file handler. The `level` will be inherited from the default logger setup below.
-# This will keep the 3 most recent log files, each up to 1MB in size.
-logzero.logfile(log_path, maxBytes=1e6, backupCount=3, encoding='utf-8')
-
 # --- START: MODIFIED SECTION FOR DEBUGGING ---
+# 1. Configure a rotating file handler. The `level` is set to DEBUG to capture all trace messages.
+# This will keep the 3 most recent log files, each up to 1MB in size.
+logzero.logfile(log_path, maxBytes=1e6, backupCount=3, encoding='utf-8', level=logging.DEBUG)
+
 # 2. Configure the default logger (which includes the console) and set the global logging level to DEBUG.
 logzero.setup_default_logger(level=logging.DEBUG)
 
