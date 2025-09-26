@@ -1187,18 +1187,19 @@ def _get_lowest_price_from_string(text_value):
         return None
     return None
 
+# =====================================================================================================================
+# --- START: MODIFIED SECTION AS PER USER REQUEST ---
+# =====================================================================================================================
 def check_and_update_all_breakdown_statuses():
     """
-    A single, unified function to check and update the status columns for all breakdown conditions
-    (AA, AC, AE, AG) based on the 15-minute candle close. It also handles clearing the status
-    and coloring the background red on breakdown.
+    MODIFIED: A single function to update status columns (AA, AC, AE, AG).
+    If the 15-min candle closes below a trigger level, it writes "Yes (Timestamp)" and colors the cell red.
+    If the price moves back up, it clears the cell.
     """
     logger.info("Checking all breakdown statuses based on 15-min close...")
-    # --- START: MODIFIED SECTION ---
     requests_queued = []
     RED_COLOR = (254, 112, 112)
     dashboard_sheet_id = Dashboard.id
-    # --- END: MODIFIED SECTION ---
 
     with data_lock:
         setup_details_copy = excel_3pct_setup_details.copy()
@@ -1225,13 +1226,10 @@ def check_and_update_all_breakdown_statuses():
         range_to_get = f"{start_col}{START_ROW_DATA}:{end_col}{last_row}"
         sheet_data = Dashboard.get(range_to_get)
 
-        # Helper to safely get data from the pre-fetched sheet_data
         def get_sheet_value(row_idx, col_letter):
-            if row_idx < 0 or row_idx >= len(sheet_data):
-                return ""
+            if row_idx < 0 or row_idx >= len(sheet_data): return ""
             col_idx = col_to_num(col_letter) - col_to_num(start_col)
-            if col_idx < 0 or col_idx >= len(sheet_data[row_idx]):
-                return ""
+            if col_idx < 0 or col_idx >= len(sheet_data[row_idx]): return ""
             return sheet_data[row_idx][col_idx]
 
     except Exception as e:
@@ -1239,17 +1237,17 @@ def check_and_update_all_breakdown_statuses():
         return
 
     for token, symbol_entries in setup_details_copy.items():
-        # Get the latest 15-minute candle for this token
         candle_history = volume_history_copy.get(token, {}).get('FIFTEEN_MINUTE')
         if not candle_history:
             continue
-        last_close = candle_history[-1]['close']
+        
+        last_candle = candle_history[-1]
+        last_close = last_candle['close']
+        last_candle_time = last_candle['start_time']
 
         for entry in symbol_entries:
             row, row_idx = entry["row"], entry["row"] - START_ROW_DATA
-            symbol = entry.get('symbol', 'Unknown') # Get symbol for logging
-
-            # --- Define the setups to check ---
+            
             setups = [
                 {'name': 'Trailing Stop', 'input_col': TRAILING_STOP_INPUT_COL, 'status_col': TRAILING_STOP_STATUS_COL, 'is_multi_price': False},
                 {'name': 'Highest Up Candle', 'input_col': HIGHEST_UP_CANDLE_COL, 'status_col': HIGHEST_UP_CANDLE_STATUS_COL, 'is_multi_price': True},
@@ -1264,50 +1262,127 @@ def check_and_update_all_breakdown_statuses():
 
                 if setup['is_multi_price']:
                     trigger_price = _get_lowest_price_from_string(input_val_str)
-                else: # For single price inputs like Trailing Stop
+                else:
                     try:
                         trigger_price = float(str(input_val_str).replace(',', '')) if input_val_str else None
                     except (ValueError, TypeError):
                         trigger_price = None
                 
                 if trigger_price is None:
-                    # If there's no valid input price, ensure the status is clear
                     if current_status.strip() != "":
-                        # --- START: MODIFIED SECTION ---
                         cell_range = {"sheetId": dashboard_sheet_id, "startRowIndex": row - 1, "endRowIndex": row, "startColumnIndex": col_to_num(setup['status_col']) - 1, "endColumnIndex": col_to_num(setup['status_col'])}
                         cell_data = {"userEnteredValue": {"stringValue": ""}, "userEnteredFormat": {"backgroundColor": rgb_to_float(None)}}
                         fields = "userEnteredValue,userEnteredFormat.backgroundColor"
                         requests_queued.append({"updateCells": {"rows": [{"values": [cell_data]}], "fields": fields, "range": cell_range}})
-                        # --- END: MODIFIED SECTION ---
                     continue
 
-                # --- Core Breakdown and Clear Logic ---
                 new_status = ""
                 if last_close < trigger_price:
-                    new_status = "Breakdown"
+                    # --- THIS IS THE MODIFIED LOGIC ---
+                    formatted_time = last_candle_time.strftime('%d %B, %I:%M %p')
+                    new_status = f"Yes ({formatted_time})"
                 
-                # Queue update only if the status has changed
                 if new_status.strip() != current_status.strip():
-                    # --- START: MODIFIED SECTION ---
                     cell_range = {"sheetId": dashboard_sheet_id, "startRowIndex": row - 1, "endRowIndex": row, "startColumnIndex": col_to_num(setup['status_col']) - 1, "endColumnIndex": col_to_num(setup['status_col'])}
                     
-                    if new_status == "Breakdown":
-                        bg_color = RED_COLOR
-                    else:
-                        bg_color = None # Reset to default color
+                    bg_color = RED_COLOR if new_status.startswith("Yes") else None
 
                     cell_data = {"userEnteredValue": {"stringValue": new_status}, "userEnteredFormat": {"backgroundColor": rgb_to_float(bg_color)}}
                     fields = "userEnteredValue,userEnteredFormat.backgroundColor"
                     requests_queued.append({"updateCells": {"rows": [{"values": [cell_data]}], "fields": fields, "range": cell_range}})
-                    # --- END: MODIFIED SECTION ---
 
-    # --- START: MODIFIED SECTION ---
     if requests_queued:
         gsheet.batch_update({'requests': requests_queued})
         logger.info(f"Applied {len(requests_queued)} dynamic breakdown status updates (with color) to Dashboard.")
     else:
         logger.info("No dynamic breakdown status updates were needed.")
-    # --- END: MODIFIED SECTION ---
+
+def check_and_update_breakdown_status():
+    """
+    MODIFIED: Checks for a change in breakdown status to trigger the "Sell" alert.
+    Triggers when a status column changes from empty to containing "Yes".
+    """
+    global previous_breakdown_state
+    logger.info("Checking for breakdown status changes to trigger alerts...")
+    value_updates = []
+
+    with data_lock:
+        setup_details_copy = excel_3pct_setup_details.copy()
+
+    if not setup_details_copy:
+        return
+
+    setups_to_check = [
+        {'status_col': TRAILING_STOP_STATUS_COL},
+        {'status_col': HIGHEST_UP_CANDLE_STATUS_COL},
+        {'status_col': HIGH_VOL_STATUS_COL},
+        {'status_col': PCT_DOWN_STATUS_COL}
+    ]
+
+    try:
+        all_cols = [s['status_col'] for s in setups_to_check]
+        start_col, end_col = min(all_cols, key=col_to_num), max(all_cols, key=col_to_num)
+        last_row = max((e['row'] for token, entries in setup_details_copy.items() for e in entries if entries), default=0)
+        if last_row < START_ROW_DATA: return
+        range_to_get = f"{start_col}{START_ROW_DATA}:{end_col}{last_row}"
+        sheet_data = Dashboard.get(range_to_get)
+
+    except Exception as e:
+        logger.error(f"Failed to fetch setup data from Google Sheet for alert check: {e}")
+        return
+
+    for token, symbol_entries in setup_details_copy.items():
+        if token in sell_triggered_today:
+            continue
+
+        breakdown_detected_this_cycle = False
+        
+        for entry in symbol_entries:
+            row, row_idx = entry["row"], entry["row"] - START_ROW_DATA
+
+            if row_idx < 0 or row_idx >= len(sheet_data): continue
+
+            for setup in setups_to_check:
+                status_col_letter = setup['status_col']
+                status_col_idx = col_to_num(status_col_letter) - col_to_num(start_col)
+
+                current_status = ""
+                if status_col_idx < len(sheet_data[row_idx]):
+                    current_status = str(sheet_data[row_idx][status_col_idx])
+                
+                cell_key = (row, status_col_letter)
+                previous_status = str(previous_breakdown_state.get(cell_key, ""))
+
+                # --- THIS IS THE MODIFIED LOGIC ---
+                is_breakdown_now = "yes" in current_status.lower()
+                was_breakdown_before = "yes" in previous_status.lower()
+
+                if is_breakdown_now and not was_breakdown_before:
+                    logger.info(f"!!! NEW BREAKDOWN DETECTED for {entry['symbol']} on row {row} in column {status_col_letter} !!!")
+                    breakdown_detected_this_cycle = True
+                
+                previous_breakdown_state[cell_key] = current_status
+
+                if breakdown_detected_this_cycle: break
+            if breakdown_detected_this_cycle: break
+
+        if breakdown_detected_this_cycle:
+            logger.info(f"!!! AUTO SELL TRIGGER for {symbol_entries[0]['symbol']} due to new breakdown. !!!")
+            with data_lock:
+                sell_triggered_today.add(token)
+
+            for entry in symbol_entries:
+                row = entry["row"]
+                value_updates.append({"range": f"{ACTION_COL}{row}", "values": [["Sell"]]})
+                trigger_apps_script_alert("position_closed", row, entry['symbol'], entry['exchange'])
+                time.sleep(1)
+
+    if value_updates:
+        Dashboard.batch_update(value_updates, value_input_option='USER_ENTERED')
+        logger.info(f"Applied {len(value_updates)} automatic sell updates to Dashboard.")
+# =====================================================================================================================
+# --- END: MODIFIED SECTION ---
+# =====================================================================================================================
 
 def check_and_update_price_volume_setups():
     """
@@ -1681,108 +1756,6 @@ def check_and_update_order_statuses():
 # =====================================================================================================================
 #
 #                                --- END: NEW ORDER TRACKING LOGIC BASED ON DOCUMENT ---
-#
-# =====================================================================================================================
-
-# --- START: MODIFIED SECTION ---
-def check_and_update_breakdown_status():
-    """
-    MODIFIED: Checks for breakdown status and implements the new hybrid "Sell" trigger system.
-    Triggers an alert only when a status changes from non-breakdown to breakdown.
-    """
-    global previous_breakdown_state
-    logger.info("Checking for breakdown status changes...")
-    value_updates = []
-
-    with data_lock:
-        setup_details_copy = excel_3pct_setup_details.copy()
-
-    if not setup_details_copy:
-        return
-
-    setups_to_check = [
-        {'status_col': TRAILING_STOP_STATUS_COL},
-        {'status_col': HIGHEST_UP_CANDLE_STATUS_COL},
-        {'status_col': HIGH_VOL_STATUS_COL},
-        {'status_col': PCT_DOWN_STATUS_COL}
-    ]
-
-    try:
-        # Define the range to fetch from the sheet in one go
-        all_cols = [s['status_col'] for s in setups_to_check]
-        start_col = min(all_cols, key=col_to_num)
-        end_col = max(all_cols, key=col_to_num)
-        last_row = max((e['row'] for token, entries in setup_details_copy.items() for e in entries if entries), default=0)
-        if last_row < START_ROW_DATA:
-            return
-        range_to_get = f"{start_col}{START_ROW_DATA}:{end_col}{last_row}"
-        sheet_data = Dashboard.get(range_to_get)
-
-    except Exception as e:
-        logger.error(f"Failed to fetch setup data from Google Sheet: {e}")
-        return
-
-    for token, symbol_entries in setup_details_copy.items():
-        if token in sell_triggered_today:
-            continue
-
-        breakdown_detected_this_cycle = False
-        
-        for entry in symbol_entries:
-            row = entry["row"]
-            row_idx = row - START_ROW_DATA
-
-            if row_idx < 0 or row_idx >= len(sheet_data):
-                continue
-
-            for setup in setups_to_check:
-                status_col_letter = setup['status_col']
-                status_col_idx = col_to_num(status_col_letter) - col_to_num(start_col)
-
-                current_status = ""
-                if status_col_idx < len(sheet_data[row_idx]):
-                    current_status = str(sheet_data[row_idx][status_col_idx])
-                
-                # --- START: NEW STATEFUL LOGIC ---
-                cell_key = (row, status_col_letter)
-                previous_status = str(previous_breakdown_state.get(cell_key, ""))
-
-                is_breakdown_now = "breakdown" in current_status.lower()
-                was_breakdown_before = "breakdown" in previous_status.lower()
-
-                if is_breakdown_now and not was_breakdown_before:
-                    logger.info(f"!!! NEW BREAKDOWN DETECTED for {entry['symbol']} on row {row} in column {status_col_letter} !!!")
-                    breakdown_detected_this_cycle = True
-                
-                # Always update the state to the current value from the sheet
-                previous_breakdown_state[cell_key] = current_status
-                # --- END: NEW STATEFUL LOGIC ---
-
-                if breakdown_detected_this_cycle:
-                    break
-            
-            if breakdown_detected_this_cycle:
-                break
-
-        if breakdown_detected_this_cycle:
-            logger.info(f"!!! AUTO SELL TRIGGER for {symbol_entries[0]['symbol']} due to new breakdown. !!!")
-            with data_lock:
-                sell_triggered_today.add(token)
-
-            for entry in symbol_entries:
-                row = entry["row"]
-                value_updates.append({"range": f"{ACTION_COL}{row}", "values": [["Sell"]]})
-                trigger_apps_script_alert("position_closed", row, entry['symbol'], entry['exchange'])
-                time.sleep(1)
-
-    if value_updates:
-        Dashboard.batch_update(value_updates, value_input_option='USER_ENTERED')
-        logger.info(f"Applied {len(value_updates)} automatic sell updates to Dashboard.")
-# --- END: MODIFIED SECTION ---
-
-# =====================================================================================================================
-#
-#                                         --- GOOGLE SHEET SCANNING AND UPDATING ---
 #
 # =====================================================================================================================
 
