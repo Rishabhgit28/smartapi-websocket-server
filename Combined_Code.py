@@ -2,7 +2,7 @@
 # Combined Trading Dashboard and Signal Generator
 # Merges the functionality of smartWebSocketV2.py (live dashboard) and ORH.py (trade signal detection).
 # This single script provides real-time P&L tracking and simultaneously monitors for ORH and 3% Down setups.
-# VERSION: Concurrent (Threaded) with Advanced Order Status Tracking
+# VERSION: Concurrent (Threaded) with Signal Generation Only (No Order Management)
 # =====================================================================================================================
 
 # --- Core Python and System Imports ---
@@ -106,7 +106,7 @@ TOTP_SECRET = "QHO5IWOISV56Z2BFTPFSRSQVRQ"
 GOOGLE_SHEET_ID = '1cYBpsVKCbrYCZzrj8NAMEgUG4cXy5Q5r9BtQE1Cjmz0'
 DASHBOARD_SHEET_NAME = 'Dashboard'
 ATH_CACHE_SHEET_NAME = 'ATH Cache'
-ORDERS_SHEET_NAME = 'Orders'
+# --- REMOVED: ORDERS_SHEET_NAME ---
 
 # --- Apps Script Web App URL for Instant Triggers ---
 APPS_SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycby40oa_gihCiVkxooq_6_jm-yyemFlAhb5W_bshsY1BwdQFnFJpiOtYKStwGcwZL1Fy/exec" # <-- PASTE YOUR URL HERE
@@ -138,7 +138,7 @@ smart_ws = None
 gsheet = None
 Dashboard = None
 ATHCache = None
-OrdersSheet = None
+# --- REMOVED: OrdersSheet = None ---
 
 # --- Threading Lock for Data Safety ---
 data_lock = threading.Lock()
@@ -169,6 +169,9 @@ previous_j_column_state = {} # For manual ORH trigger
 sell_triggered_today = set() # For hybrid Sell trigger
 previous_ah_column_state = {} # For manual Sell trigger
 previous_breakdown_state = {} # For dynamic auto-sell trigger
+# --- START: NEW CACHE FOR TRIGGER TIMESTAMPS ---
+trigger_candle_timestamps = {} # Key: (token, setup_key), Value: {'price': 123.45, 'timestamp': datetime_obj}
+# --- END: NEW CACHE FOR TRIGGER TIMESTAMPS ---
 # --- END: NEW STATE TRACKING ---
 
 
@@ -272,37 +275,7 @@ def get_ist_time():
     """Returns the current time in Indian Standard Time."""
     return datetime.datetime.now(ZoneInfo("Asia/Kolkata"))
 
-def normalize_status(api_status):
-    """
-    Maps raw API status strings to a user-friendly, unified format, as per the research document.
-    """
-    if not api_status or not isinstance(api_status, str):
-        return 'Unknown'
-
-    status_lower = api_status.lower()
-
-    status_mapping = {
-        # GTT Statuses from gttLists
-        'active': 'Pending Trigger',
-        'new': 'Pending Trigger',
-        'triggered': 'Triggered - Awaiting ID',
-        'cancelled': 'Cancelled',
-        'expired': 'Expired',
-        'rejected': 'Rejected',
-
-        # Order Statuses from getOrderBook
-        'open': 'Pending Execution',
-        'pending': 'Pending Execution',
-        'complete': 'Completed',
-        'executed': 'Completed',
-        # 'rejected' and 'cancelled' are already mapped above
-
-        # Custom statuses for tracking
-        'not_found_in_gtt_list': 'GTT Rule Not Found',
-        'not_found_in_order_book': 'Order Not in Book'
-    }
-    return status_mapping.get(status_lower, api_status.title())
-
+# --- REMOVED: normalize_status function ---
 
 def get_full_name_from_yahoo(symbol, exchange):
     """
@@ -789,7 +762,7 @@ def fetch_previous_day_candle_data_high(smart_api_obj, symbols_to_fetch):
         if current_day.weekday() < 5:
             trading_days_found.append(current_day)
         current_day -= timedelta(days=1)
-    
+
     if len(trading_days_found) < 1:
         logger.warning("Could not determine any previous trading days.")
         return
@@ -797,10 +770,10 @@ def fetch_previous_day_candle_data_high(smart_api_obj, symbols_to_fetch):
     # The last trading day is the first in our found list, the earliest is the last
     to_date = trading_days_found[0]
     from_date = trading_days_found[-1]
-    
+
     from_date_str = from_date.strftime("%Y-%m-%d %H:%M")
     to_date_str = to_date.strftime("%Y-%m-%d %H:%M")
-    
+
     # Use the date of the most recent trading day for the cache key
     cache_check_date_str = to_date.strftime("%Y-%m-%d")
     # --- END: NEW LOGIC ---
@@ -813,7 +786,7 @@ def fetch_previous_day_candle_data_high(smart_api_obj, symbols_to_fetch):
     for token, entries in symbols_to_fetch_copy.items():
         if not entries: continue
         symbol_name, exchange_type = entries[0]['symbol'], entries[0]['exchange_type']
-        
+
         # Check cache using the most recent trading day's date
         if token in previous_day_high_cache and previous_day_high_cache[token].get('date') == cache_check_date_str:
             logger.info(f"Last 3 Days' High for {symbol_name} (Token: {token}): {previous_day_high_cache[token]['high']:.2f} (from cache)")
@@ -830,7 +803,7 @@ def fetch_previous_day_candle_data_high(smart_api_obj, symbols_to_fetch):
             try:
                 historic_param = {"exchange": exchange_str, "symboltoken": token, "interval": "ONE_DAY", "fromdate": from_date_str, "todate": to_date_str}
                 response = smart_api_obj.getCandleData(historic_param)
-                
+
                 if response and response.get("status") and response.get("data"):
                     if response["data"]:
                         # Extract the high from each day's candle (index 2) and find the maximum
@@ -838,7 +811,7 @@ def fetch_previous_day_candle_data_high(smart_api_obj, symbols_to_fetch):
                         highest_high_last_3_days = max(all_highs)
 
                         logger.info(f"Last 3 Days' High for {symbol_name} (Token: {token}): {highest_high_last_3_days:.2f} (fetched from API)")
-                        
+
                         # Update cache with the new highest high and the date of the last trading day
                         previous_day_high_cache[token] = {'date': cache_check_date_str, 'high': highest_high_last_3_days}
                         save_previous_day_high_cache()
@@ -1097,6 +1070,7 @@ def process_manual_orh_trigger(token, row):
 def process_orh_actions(token, buy_price, sl_base_price, trigger_time):
     """
     A unified function to handle all actions after an ORH trigger (manual or automatic).
+    MODIFIED: Removed logic to create a new order row.
     """
     updates_queued = []
     with data_lock:
@@ -1131,24 +1105,7 @@ def process_orh_actions(token, buy_price, sl_base_price, trigger_time):
         trigger_apps_script_alert("new_trade", row, entry['symbol'], entry['exchange'])
         time.sleep(1)
 
-        try:
-            qty_str = Dashboard.acell(f"{SETUP_QTY_COL}{row}").value
-            quantity = int(qty_str) if qty_str and qty_str.isdigit() else 0
-
-            if quantity <= 0:
-                logger.warning(f"Cannot create order for {entry['symbol']}, quantity is missing or zero.")
-                continue
-
-            # For both manual and auto, the order trigger is placed above the buy price
-            order_trigger_price = round(buy_price * 1.005, 2)
-            new_order_row = [
-                get_ist_time().strftime("%Y-%m-%d %H:%M:%S"), entry['symbol'], entry['exchange'],
-                "BUY", "STOPLOSS_MARKET", quantity, order_trigger_price, ""
-            ]
-            OrdersSheet.append_row(new_order_row, value_input_option='USER_ENTERED')
-            logger.info(f"Successfully created a pre-filled order row for {entry['symbol']}.")
-        except Exception as e:
-            logger.exception(f"Failed to create order row for {entry['symbol']}: {e}")
+        # --- MODIFICATION: The following block that created an order row has been REMOVED. ---
 
     if updates_queued:
         try:
@@ -1180,7 +1137,7 @@ def _get_lowest_price_from_string(text_value):
             match = re.match(r'^\s*([0-9\.]+)', part)
             if match:
                 prices.append(float(match.group(1)))
-        
+
         if prices:
             return min(prices)
     except (ValueError, TypeError):
@@ -1193,8 +1150,8 @@ def _get_lowest_price_from_string(text_value):
 def check_and_update_all_breakdown_statuses():
     """
     MODIFIED: A single function to update status columns (AA, AC, AE, AG).
-    If the 15-min candle closes below a trigger level, it writes "Yes (Timestamp)" and colors the cell red.
-    If the price moves back up, it clears the cell.
+    If the 15-min candle closes below a trigger level AND occurs after the trigger candle's timestamp,
+    it writes "Yes (Timestamp)" and colors the cell red. If the price recovers, it clears the cell.
     """
     logger.info("Checking all breakdown statuses based on 15-min close...")
     requests_queued = []
@@ -1204,12 +1161,12 @@ def check_and_update_all_breakdown_statuses():
     with data_lock:
         setup_details_copy = excel_3pct_setup_details.copy()
         volume_history_copy = volume_history_3pct.copy()
+        timestamps_cache_copy = trigger_candle_timestamps.copy()
 
     if not setup_details_copy:
         return
 
     try:
-        # Define all columns to read from the sheet in one go
         cols_to_read = [
             TRAILING_STOP_INPUT_COL, TRAILING_STOP_STATUS_COL,
             HIGHEST_UP_CANDLE_COL, HIGHEST_UP_CANDLE_STATUS_COL,
@@ -1240,19 +1197,19 @@ def check_and_update_all_breakdown_statuses():
         candle_history = volume_history_copy.get(token, {}).get('FIFTEEN_MINUTE')
         if not candle_history:
             continue
-        
+
         last_candle = candle_history[-1]
         last_close = last_candle['close']
         last_candle_time = last_candle['start_time']
 
         for entry in symbol_entries:
             row, row_idx = entry["row"], entry["row"] - START_ROW_DATA
-            
+
             setups = [
-                {'name': 'Trailing Stop', 'input_col': TRAILING_STOP_INPUT_COL, 'status_col': TRAILING_STOP_STATUS_COL, 'is_multi_price': False},
-                {'name': 'Highest Up Candle', 'input_col': HIGHEST_UP_CANDLE_COL, 'status_col': HIGHEST_UP_CANDLE_STATUS_COL, 'is_multi_price': True},
-                {'name': 'High Volume', 'input_col': HIGH_VOL_RESULT_COL, 'status_col': HIGH_VOL_STATUS_COL, 'is_multi_price': True},
-                {'name': '3% Down', 'input_col': PCT_DOWN_RESULT_COL, 'status_col': PCT_DOWN_STATUS_COL, 'is_multi_price': True},
+                {'name': 'Trailing Stop', 'input_col': TRAILING_STOP_INPUT_COL, 'status_col': TRAILING_STOP_STATUS_COL, 'is_multi_price': False, 'key': 'trailing_stop'},
+                {'name': 'Highest Up Candle', 'input_col': HIGHEST_UP_CANDLE_COL, 'status_col': HIGHEST_UP_CANDLE_STATUS_COL, 'is_multi_price': True, 'key': 'highest_up'},
+                {'name': 'High Volume', 'input_col': HIGH_VOL_RESULT_COL, 'status_col': HIGH_VOL_STATUS_COL, 'is_multi_price': True, 'key': 'high_vol'},
+                {'name': '3% Down', 'input_col': PCT_DOWN_RESULT_COL, 'status_col': PCT_DOWN_STATUS_COL, 'is_multi_price': True, 'key': '3pct_down'},
             ]
 
             for setup in setups:
@@ -1267,7 +1224,7 @@ def check_and_update_all_breakdown_statuses():
                         trigger_price = float(str(input_val_str).replace(',', '')) if input_val_str else None
                     except (ValueError, TypeError):
                         trigger_price = None
-                
+
                 if trigger_price is None:
                     if current_status.strip() != "":
                         cell_range = {"sheetId": dashboard_sheet_id, "startRowIndex": row - 1, "endRowIndex": row, "startColumnIndex": col_to_num(setup['status_col']) - 1, "endColumnIndex": col_to_num(setup['status_col'])}
@@ -1276,17 +1233,29 @@ def check_and_update_all_breakdown_statuses():
                         requests_queued.append({"updateCells": {"rows": [{"values": [cell_data]}], "fields": fields, "range": cell_range}})
                     continue
 
+                is_breakdown_valid = False
+                # --- START: MODIFIED LOGIC WITH TIME CHECK ---
+                if setup['key'] == 'trailing_stop':
+                    # Trailing stop is purely price-based, no time check needed.
+                    if last_close < trigger_price:
+                        is_breakdown_valid = True
+                else:
+                    # For other setups, check both price and time.
+                    trigger_info = timestamps_cache_copy.get((token, setup['key']))
+                    if trigger_info and trigger_price == trigger_info.get('price'):
+                        trigger_time = trigger_info.get('timestamp')
+                        if trigger_time and last_close < trigger_price and last_candle_time > trigger_time:
+                            is_breakdown_valid = True
+                # --- END: MODIFIED LOGIC WITH TIME CHECK ---
+
                 new_status = ""
-                if last_close < trigger_price:
-                    # --- THIS IS THE MODIFIED LOGIC ---
+                if is_breakdown_valid:
                     formatted_time = last_candle_time.strftime('%d %B, %I:%M %p')
                     new_status = f"Yes ({formatted_time})"
-                
+
                 if new_status.strip() != current_status.strip():
                     cell_range = {"sheetId": dashboard_sheet_id, "startRowIndex": row - 1, "endRowIndex": row, "startColumnIndex": col_to_num(setup['status_col']) - 1, "endColumnIndex": col_to_num(setup['status_col'])}
-                    
                     bg_color = RED_COLOR if new_status.startswith("Yes") else None
-
                     cell_data = {"userEnteredValue": {"stringValue": new_status}, "userEnteredFormat": {"backgroundColor": rgb_to_float(bg_color)}}
                     fields = "userEnteredValue,userEnteredFormat.backgroundColor"
                     requests_queued.append({"updateCells": {"rows": [{"values": [cell_data]}], "fields": fields, "range": cell_range}})
@@ -1296,6 +1265,9 @@ def check_and_update_all_breakdown_statuses():
         logger.info(f"Applied {len(requests_queued)} dynamic breakdown status updates (with color) to Dashboard.")
     else:
         logger.info("No dynamic breakdown status updates were needed.")
+# =====================================================================================================================
+# --- END: MODIFIED SECTION ---
+# =====================================================================================================================
 
 def check_and_update_breakdown_status():
     """
@@ -1336,7 +1308,7 @@ def check_and_update_breakdown_status():
             continue
 
         breakdown_detected_this_cycle = False
-        
+
         for entry in symbol_entries:
             row, row_idx = entry["row"], entry["row"] - START_ROW_DATA
 
@@ -1349,7 +1321,7 @@ def check_and_update_breakdown_status():
                 current_status = ""
                 if status_col_idx < len(sheet_data[row_idx]):
                     current_status = str(sheet_data[row_idx][status_col_idx])
-                
+
                 cell_key = (row, status_col_letter)
                 previous_status = str(previous_breakdown_state.get(cell_key, ""))
 
@@ -1360,7 +1332,7 @@ def check_and_update_breakdown_status():
                 if is_breakdown_now and not was_breakdown_before:
                     logger.info(f"!!! NEW BREAKDOWN DETECTED for {entry['symbol']} on row {row} in column {status_col_letter} !!!")
                     breakdown_detected_this_cycle = True
-                
+
                 previous_breakdown_state[cell_key] = current_status
 
                 if breakdown_detected_this_cycle: break
@@ -1380,20 +1352,20 @@ def check_and_update_breakdown_status():
     if value_updates:
         Dashboard.batch_update(value_updates, value_input_option='USER_ENTERED')
         logger.info(f"Applied {len(value_updates)} automatic sell updates to Dashboard.")
-# =====================================================================================================================
-# --- END: MODIFIED SECTION ---
-# =====================================================================================================================
 
+# =====================================================================================================================
+# --- START: MODIFIED SECTION AS PER USER REQUEST ---
+# =====================================================================================================================
 def check_and_update_price_volume_setups():
     """
-    Checks for 3% down, high volume, and highest up candle setups based on historical data.
-    Implements proximity consolidation and price-based sorting for the output.
+    MODIFIED: Checks for 3% down, high volume, and highest up candle setups.
+    It now saves the timestamp of the identified trigger candle to an in-memory cache
+    for the time-sensitive breakdown check.
     """
-    logger.info("Checking for Price/Volume setups with proximity consolidation and price sorting...")
+    logger.info("Checking for Price/Volume setups and caching trigger timestamps...")
     updates_queued = []
 
     try:
-        # Fetch current values from the sheet to prevent redundant updates
         pct_down_result_col_values = Dashboard.col_values(col_to_num(PCT_DOWN_RESULT_COL))
         high_volume_result_col_values = Dashboard.col_values(col_to_num(HIGH_VOL_RESULT_COL))
         highest_up_col_values = Dashboard.col_values(col_to_num(HIGHEST_UP_CANDLE_COL))
@@ -1407,29 +1379,24 @@ def check_and_update_price_volume_setups():
 
     def format_consolidated_output(candle_dict):
         """
-        New formatting logic:
-        1. Consolidates signals if their lows are within a 2% threshold.
-        2. For consolidated signals, keeps only the highest timeframe.
-        3. Sorts the final, unique signals by low price (high to low).
-        4. Formats the output string as "price (timeframe)".
+        MODIFIED: This helper function now returns three values:
+        1. The formatted string for the Google Sheet.
+        2. The lowest price of the final, consolidated signals.
+        3. The timestamp of the candle corresponding to that lowest price.
         """
-        # 1. Get all valid candidate candles
         available_candles = [
             {'candle': c, 'interval_api': interval_api}
             for interval_api, c in candle_dict.items() if c
         ]
         if not available_candles:
-            return ""
+            return "", None, None
 
-        # Sort by low price initially to make grouping easier
         available_candles.sort(key=lambda x: x['candle']['low'])
 
-        # 2. Group candles by proximity (2% threshold)
         groups = []
         if available_candles:
             current_group = [available_candles[0]]
             for i in range(1, len(available_candles)):
-                # Check if current candle's low is within 2% of the first candle in the group
                 if available_candles[i]['candle']['low'] <= current_group[0]['candle']['low'] * 1.02:
                     current_group.append(available_candles[i])
                 else:
@@ -1437,39 +1404,34 @@ def check_and_update_price_volume_setups():
                     current_group = [available_candles[i]]
             groups.append(current_group)
 
-        # 3. For each group, select the one with the highest timeframe
-        unique_signals = []
-        for group in groups:
-            best_in_group = max(group, key=lambda info: CANDLE_INTERVALS_3PCT_API.index(info['interval_api']))
-            unique_signals.append(best_in_group)
-
-        # 4. Sort the final unique signals by low price, descending (high to low)
+        unique_signals = [max(group, key=lambda info: CANDLE_INTERVALS_3PCT_API.index(info['interval_api'])) for group in groups]
         sorted_unique_signals = sorted(unique_signals, key=lambda info: info['candle']['low'], reverse=True)
 
-        # 5. Format the final output string
-        output_parts = []
-        for signal_info in sorted_unique_signals:
-            candle = signal_info['candle']
-            interval_name = CANDLE_INTERVAL_MAP_DISPLAY[signal_info['interval_api']]
-            output_parts.append(f"{candle['low']:.2f} ({interval_name})")
+        output_parts = [f"{s['candle']['low']:.2f} ({CANDLE_INTERVAL_MAP_DISPLAY[s['interval_api']]})" for s in sorted_unique_signals]
 
-        return ", ".join(output_parts)
+        # --- NEW LOGIC: Find the lowest price and its timestamp from the final signals ---
+        if sorted_unique_signals:
+            lowest_signal = min(sorted_unique_signals, key=lambda info: info['candle']['low'])
+            lowest_price = lowest_signal['candle']['low']
+            lowest_price_timestamp = lowest_signal['candle']['start_time']
+            return ", ".join(output_parts), lowest_price, lowest_price_timestamp
+
+        return "", None, None
+
 
     for token, symbol_entries in setup_details_copy.items():
         three_pct_down_candles = {}
         high_vol_candles = {}
         highest_up_candles = {}
 
-        # --- Phase 1: Find the best candidate candle for each timeframe ---
         for interval_api in CANDLE_INTERVALS_3PCT_API:
             candle_history = volume_history_copy.get(token, {}).get(interval_api)
             if not candle_history:
                 continue
 
-            triggered_3pct_candles = [c for c in candle_history if c.get('high', 0) > 0 and (c['high'] - c['close']) / c['high'] >= 0.03]
-            if triggered_3pct_candles:
-                # Prioritize the most recent candle, not the one with the lowest price.
-                three_pct_down_candles[interval_api] = triggered_3pct_candles[-1]
+            triggered_3pct = [c for c in candle_history if c.get('high', 0) > 0 and (c['high'] - c['close']) / c['high'] >= 0.03]
+            if triggered_3pct:
+                three_pct_down_candles[interval_api] = triggered_3pct[-1]
 
             if any(c.get('volume', 0) > 0 for c in candle_history):
                 high_vol_candles[interval_api] = max(candle_history, key=lambda c: c.get('volume', 0))
@@ -1478,12 +1440,22 @@ def check_and_update_price_volume_setups():
             if gainer_candles:
                 highest_up_candles[interval_api] = max(gainer_candles, key=lambda c: (c['close'] - c['open']) / c['open'])
 
-        # --- Phase 2: Consolidate and format outputs using the new logic ---
-        final_output_3_pct = format_consolidated_output(three_pct_down_candles)
-        final_output_high_vol = format_consolidated_output(high_vol_candles)
-        final_output_highest_up = format_consolidated_output(highest_up_candles)
+        # --- MODIFIED: Process each setup and cache its trigger timestamp ---
+        final_output_3_pct, price_3pct, ts_3pct = format_consolidated_output(three_pct_down_candles)
+        if ts_3pct:
+            with data_lock:
+                trigger_candle_timestamps[(token, '3pct_down')] = {'price': price_3pct, 'timestamp': ts_3pct}
 
-        # --- Phase 3: Prepare updates for the sheet, only if the value has changed ---
+        final_output_high_vol, price_hv, ts_hv = format_consolidated_output(high_vol_candles)
+        if ts_hv:
+            with data_lock:
+                trigger_candle_timestamps[(token, 'high_vol')] = {'price': price_hv, 'timestamp': ts_hv}
+
+        final_output_highest_up, price_hu, ts_hu = format_consolidated_output(highest_up_candles)
+        if ts_hu:
+            with data_lock:
+                trigger_candle_timestamps[(token, 'highest_up')] = {'price': price_hu, 'timestamp': ts_hu}
+
         for entry in symbol_entries:
             row, row_idx = entry["row"], entry["row"] - 1
 
@@ -1501,261 +1473,22 @@ def check_and_update_price_volume_setups():
         logger.info(f"Applied {len(updates_queued)} Price/Volume setup updates to Dashboard.")
     else:
         logger.info("No Price/Volume setup updates were needed.")
+# =====================================================================================================================
+# --- END: MODIFIED SECTION ---
+# =====================================================================================================================
+
 
 # =====================================================================================================================
 #
-#                                --- START: NEW ORDER TRACKING LOGIC BASED ON DOCUMENT ---
+#                                --- START: REMOVED ORDER TRACKING LOGIC ---
 #
 # =====================================================================================================================
 
-def check_and_place_orders():
-    """
-    Scans the 'Orders' sheet for rows marked 'PENDING' in column L, validates,
-    and submits them to the broker. Sets an initial status of 'ACCEPTED' or 'ERROR'.
-    MODIFIED: Uses batch updates to avoid API quota errors.
-    """
-    try:
-        if not OrdersSheet:
-            logger.warning("OrdersSheet object not initialized. Skipping order placement.")
-            return
-
-        all_values = OrdersSheet.get_all_values()
-        if len(all_values) < 3: return
-
-        updates_to_make = []
-
-        for idx, row_data in enumerate(all_values):
-            row_num = idx + 1
-            if row_num < 3: continue
-
-            try:
-                # Trigger from Column L (index 11)
-                if len(row_data) < 12: continue
-                trigger_status = str(row_data[11]).strip().upper()
-
-                if trigger_status != 'PENDING': continue
-
-                logger.info(f"Found a pending submission on row {row_num}: {row_data}")
-
-                # Immediately update status to 'PROCESSING' to prevent re-submission
-                updates_to_make.append({'range': f'J{row_num}', 'values': [['PROCESSING']]})
-                # Clear the trigger column immediately in the same batch
-                updates_to_make.append({'range': f'L{row_num}', 'values': [['']]})
-
-                symbol = str(row_data[2])
-                exchange = str(row_data[3])
-                action = str(row_data[4]).upper()
-                order_type = str(row_data[5]).upper()
-                quantity = int(row_data[6])
-                price_or_trigger = float(row_data[7] or 0)
-
-                if not all([symbol, exchange, action, order_type, quantity > 0]):
-                    raise ValueError("Missing or invalid required fields (Symbol, Exchange, Action, Type, Qty)")
-
-                token_cache = {}
-                instrument_info = get_or_fetch_instrument_details(symbol, exchange, token_cache)
-                if not instrument_info:
-                    raise ValueError(f"Could not find token for symbol {symbol}")
-                token = instrument_info['token']
-
-                order_id_or_rule_id = None
-                response_data = None # Initialize response data for logging
-
-                if order_type == 'GTT':
-                    logger.info(f"Submitting GTT order for row {row_num}...")
-                    gtt_params = {
-                        "tradingsymbol": symbol, "symboltoken": token, "exchange": exchange,
-                        "transactiontype": action, "producttype": "DELIVERY", "price": price_or_trigger,
-                        "qty": quantity, "triggerprice": price_or_trigger, "disclosedqty": 0, "timeperiod": 365
-                    }
-                    response_data = smart_api_obj.gttCreateRule(gtt_params)
-
-                    if isinstance(response_data, int) and response_data > 0:
-                        order_id_or_rule_id = response_data
-                    elif isinstance(response_data, dict) and response_data.get("data"):
-                        data_payload = response_data["data"]
-                        order_id_or_rule_id = data_payload.get("ruleid") if isinstance(data_payload, dict) else data_payload
-
-                    if not order_id_or_rule_id:
-                        error_message = "GTT creation failed."
-                        if isinstance(response_data, dict):
-                            error_message = response_data.get("message", error_message)
-                        logger.error(f"Full API response for failed GTT: {response_data}")
-                        raise DataException(error_message)
-
-                else: # Handle regular orders
-                    logger.info(f"Submitting regular order for row {row_num}...")
-                    order_params = {
-                        "variety": "NORMAL", "tradingsymbol": symbol, "symboltoken": token,
-                        "transactiontype": action, "exchange": exchange, "ordertype": order_type,
-                        "producttype": "DELIVERY", "duration": "DAY", "quantity": quantity
-                    }
-                    if order_type == 'LIMIT':
-                        order_params["price"] = price_or_trigger
-                    elif order_type == 'STOPLOSS_MARKET':
-                        order_params["triggerprice"] = price_or_trigger
-                        order_params["price"] = 0.0
-                    else: # MARKET order
-                        order_params["price"] = 0.0
-
-                    response_data = smart_api_obj.placeOrder(order_params)
-
-                    if isinstance(response_data, dict) and response_data.get("data", {}).get("orderid"):
-                        order_id_or_rule_id = response_data["data"]["orderid"]
-                    else:
-                        error_message = "Order placement failed."
-                        if isinstance(response_data, dict):
-                            error_message = response_data.get("message", error_message)
-                        logger.error(f"Full API response for failed order: {response_data}")
-                        raise DataException(error_message)
-
-                # --- UNIFIED SUCCESS UPDATE ---
-                logger.info(f"Order for row {row_num} accepted by broker. ID: {order_id_or_rule_id}")
-                updates_to_make.append({'range': f'J{row_num}:K{row_num}', 'values': [['ACCEPTED', str(order_id_or_rule_id)]]})
-
-            except Exception as e:
-                error_text = str(e.message) if hasattr(e, 'message') and e.message else str(e)
-                logger.error(f"Failed to process order for row {row_num}: {error_text}")
-                updates_to_make.append({'range': f'J{row_num}:K{row_num}', 'values': [['ERROR', error_text]]})
-
-            time.sleep(1) # Rate limit API calls
-
-        # --- BATCH UPDATE AT THE END ---
-        if updates_to_make:
-            OrdersSheet.batch_update(updates_to_make, value_input_option='USER_ENTERED')
-            logger.info(f"Applied {len(updates_to_make)} order placement updates to the Orders sheet.")
-
-    except Exception as e:
-        logger.exception(f"An error occurred in the main order placement function: {e}")
-
-
-def check_and_update_order_statuses():
-    """
-    Efficiently queries the broker for the live status of all trackable orders,
-    normalizes the status, and updates the Google Sheet. Handles the GTT-to-order transition.
-    """
-    try:
-        if not OrdersSheet or not smart_api_obj: return
-
-        # --- 1. Fetch all data from sheet and APIs upfront with robust error handling ---
-        all_order_rows = OrdersSheet.get_all_values()
-        if len(all_order_rows) < 3: return
-
-        # Initialize with default empty values
-        all_gtt_rules_raw = {}
-        order_book_raw = {}
-
-        try:
-            # CORRECTED: Use gttLists with the mandatory status parameter
-            all_gtt_rules_raw = smart_api_obj.gttLists(status=['active', 'triggered'], page=1, count=200)
-        except DataException as e:
-            logger.warning(f"Could not fetch GTT list, API returned an error or empty response: {e}. Assuming no active GTTs.")
-        except Exception as e:
-            logger.error(f"An unexpected error occurred while fetching GTT list: {e}")
-
-        try:
-            order_book_raw = smart_api_obj.orderBook()
-        except DataException as e:
-            logger.warning(f"Could not fetch order book, API returned an error or empty response: {e}. Assuming no open orders.")
-        except Exception as e:
-            logger.error(f"An unexpected error occurred while fetching the order book: {e}")
-
-        # --- 2. Create efficient lookup maps ---
-        gtt_status_map = {str(rule['id']): rule for rule in all_gtt_rules_raw.get('data', [])} if all_gtt_rules_raw and all_gtt_rules_raw.get('data') else {}
-        order_status_map = {order['orderid']: order for order in order_book_raw.get('data', [])} if order_book_raw and order_book_raw.get('data') else {}
-
-        updates_queued = []
-
-        # --- 3. Iterate through sheet rows and update status ---
-        for idx, row in enumerate(all_order_rows):
-            row_num = idx + 1
-            if row_num < 3: continue
-
-            try:
-                # Columns: C=Symbol(2), D=Exch(3), E=Action(4), F=Type(5), G=Qty(6), J=Status(9), K=ID(10)
-                if len(row) < 11: continue
-
-                current_status_on_sheet = str(row[9]).strip().upper()
-                order_id = str(row[10]).strip()
-                order_type = str(row[5]).strip().upper()
-
-                # Skip rows that are in a terminal state or don't need tracking
-                if current_status_on_sheet in ['COMPLETED', 'REJECTED', 'CANCELLED', 'ERROR', 'EXPIRED'] or not order_id:
-                    continue
-
-                new_status_normalized = None
-                raw_api_status = None
-
-                # --- Logic for GTT Orders ---
-                if order_type == 'GTT':
-                    if order_id in gtt_status_map:
-                        raw_api_status = gtt_status_map[order_id]['status']
-                        new_status_normalized = normalize_status(raw_api_status)
-
-                        # --- "Bridge the Gap": Handle GTT-to-Order transition ---
-                        if new_status_normalized == 'Triggered - Awaiting ID':
-                            logger.info(f"GTT rule {order_id} triggered. Searching for matching exchange order...")
-
-                            gtt_rule = gtt_status_map[order_id]
-                            found_match = False
-                            for live_order in order_status_map.values():
-                                if (live_order['tradingsymbol'] == gtt_rule['tradingsymbol'] and
-                                    str(live_order['quantity']) == str(gtt_rule['qty']) and
-                                    live_order['transactiontype'] == gtt_rule['transactiontype']):
-
-                                    new_exchange_id = live_order['orderid']
-                                    logger.info(f"Found matching exchange order for GTT {order_id}. New Order ID: {new_exchange_id}")
-
-                                    # Update Order ID to new exchange ID and Type to GTT-LIMIT
-                                    updates_queued.append({'range': f'F{row_num}', 'values': [['GTT-LIMIT']]})
-                                    updates_queued.append({'range': f'K{row_num}', 'values': [[new_exchange_id]]})
-
-                                    # Get status of the new order
-                                    raw_api_status = live_order['status']
-                                    new_status_normalized = normalize_status(raw_api_status)
-                                    found_match = True
-                                    break
-                            if not found_match:
-                                logger.warning(f"GTT {order_id} is triggered, but no matching order found in order book yet.")
-
-                    else: # GTT ID not found in active/triggered list
-                        # --- RESILIENT LOGIC FOR RACE CONDITION ---
-                        if current_status_on_sheet == 'ACCEPTED':
-                            logger.info(f"GTT Rule {order_id} not yet in list (propagation delay). Keeping status as ACCEPTED.")
-                            new_status_normalized = 'ACCEPTED'
-                        else:
-                            raw_api_status = 'not_found_in_gtt_list'
-                            new_status_normalized = normalize_status(raw_api_status)
-
-                # --- Logic for Regular Exchange Orders (and triggered GTTs) ---
-                elif order_type in ['LIMIT', 'MARKET', 'STOPLOSS_MARKET', 'GTT-LIMIT']:
-                    if order_id in order_status_map:
-                        raw_api_status = order_status_map[order_id]['status']
-                        new_status_normalized = normalize_status(raw_api_status)
-                    else:
-                        raw_api_status = 'not_found_in_order_book'
-                        new_status_normalized = normalize_status(raw_api_status)
-
-                # --- Queue update if status has changed ---
-                if new_status_normalized and new_status_normalized.upper() != current_status_on_sheet:
-                    logger.info(f"Updating status for ID {order_id} (Row {row_num}) from '{current_status_on_sheet}' to '{new_status_normalized}'")
-                    updates_queued.append({'range': f'J{row_num}', 'values': [[new_status_normalized]]})
-
-            except Exception as e:
-                logger.warning(f"Could not check status for row {row_num}: {e}")
-                continue
-
-        # --- 4. Batch update the sheet ---
-        if updates_queued:
-            OrdersSheet.batch_update(updates_queued, value_input_option='USER_ENTERED')
-            logger.info(f"Applied {len(updates_queued)} live order status updates to the Orders sheet.")
-
-    except Exception as e:
-        logger.exception(f"An error occurred in the order status checker function: {e}")
+# --- The check_and_place_orders and check_and_update_order_statuses functions have been removed. ---
 
 # =====================================================================================================================
 #
-#                                --- END: NEW ORDER TRACKING LOGIC BASED ON DOCUMENT ---
+#                                --- END: REMOVED ORDER TRACKING LOGIC ---
 #
 # =====================================================================================================================
 
@@ -2469,6 +2202,7 @@ def run_background_task_scheduler(initial_data_ready_event):
     This function runs in a dedicated thread to handle all the slower,
     scheduled tasks like scanning the sheet for new symbols and checking for trade setups.
     MODIFIED: Now includes a check for manual ORH and Sell triggers from the sheet.
+    MODIFIED: Removed calls to order management functions.
     """
     global subscribed_tokens, excel_dashboard_details, excel_orh_setup_details, excel_3pct_setup_details, previous_j_column_state, previous_ah_column_state, previous_breakdown_state
     logger.info("Background task scheduler thread started.")
@@ -2510,10 +2244,10 @@ def run_background_task_scheduler(initial_data_ready_event):
             all_cols_init = [s['status_col'] for s in setups_to_check_init]
             start_col_init = min(all_cols_init, key=col_to_num)
             end_col_init = max(all_cols_init, key=col_to_num)
-            
+
             range_to_get_init = f"{start_col_init}{START_ROW_DATA}:{end_col_init}{last_row_full}"
             sheet_data_init = Dashboard.get(range_to_get_init)
-            
+
             for i, row_data in enumerate(sheet_data_init):
                 row_num = START_ROW_DATA + i
                 for setup in setups_to_check_init:
@@ -2530,21 +2264,20 @@ def run_background_task_scheduler(initial_data_ready_event):
 
     while True:
         try:
-            check_and_place_orders()
-            check_and_update_order_statuses()
+            # --- MODIFICATION: Calls to order management functions have been removed. ---
 
             now = get_ist_time()
             current_minute = now.minute
 
             if time.time() - last_scan_time > 15:
                 logger.info("Rescanning Google Sheet for symbol changes and manual triggers...")
-                
+
                 # --- FIX: Get the set of old ORH tokens BEFORE the scan ---
                 with data_lock:
                     old_orh_tokens = set(excel_orh_setup_details.keys())
 
                 new_dashboard, new_orh, new_3pct, current_excel_tokens = scan_sheet_for_all_symbols(Dashboard, ATHCache)
-                
+
                 # --- FIX: Identify and fetch data for NEWLY added ORH stocks ---
                 new_orh_tokens = set(new_orh.keys())
                 added_orh_tokens = new_orh_tokens - old_orh_tokens
@@ -2824,9 +2557,10 @@ def run_daily_ath_cache_update():
 def start_main_application():
     """
     The primary function that initializes connections and runs the main processing loop.
+    MODIFIED: Removed initialization of the 'Orders' sheet.
     """
     # --- FIX: All session-related variables are now global to be managed by the re-auth process ---
-    global smart_api_obj, smart_ws, gsheet, Dashboard, ATHCache, OrdersSheet, subscribed_tokens
+    global smart_api_obj, smart_ws, gsheet, Dashboard, ATHCache, subscribed_tokens
     global excel_dashboard_details, excel_orh_setup_details, excel_3pct_setup_details, instrument_master_list
     global auth_token, feed_token, websocket_thread, last_login_date
 
@@ -2849,7 +2583,7 @@ def start_main_application():
         gsheet = client.open_by_key(GOOGLE_SHEET_ID)
         Dashboard = gsheet.worksheet(DASHBOARD_SHEET_NAME)
         ATHCache = gsheet.worksheet(ATH_CACHE_SHEET_NAME)
-        OrdersSheet = gsheet.worksheet(ORDERS_SHEET_NAME)
+        # --- MODIFICATION: Removed OrdersSheet initialization ---
         logger.info("Google Sheets connected successfully.")
     except Exception as e:
         logger.error(f"Error connecting to Google Sheets: {e}. Please check credentials and sheet names. Exiting.")
