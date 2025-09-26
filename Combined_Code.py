@@ -72,17 +72,19 @@ log_path = os.path.join(log_folder_path, "app.log")
 # This will keep the 3 most recent log files, each up to 1MB in size.
 logzero.logfile(log_path, maxBytes=1e6, backupCount=3, encoding='utf-8')
 
-# 2. Configure the default logger (which includes the console) and set the global logging level.
-logzero.setup_default_logger(level=logging.INFO)
+# --- START: MODIFIED SECTION FOR DEBUGGING ---
+# 2. Configure the default logger (which includes the console) and set the global logging level to DEBUG.
+logzero.setup_default_logger(level=logging.DEBUG)
 
 
 # Explicitly add a StreamHandler for console output to ensure messages are always visible.
 if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.DEBUG) # Set console to DEBUG level
     formatter = logging.Formatter('[%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s')
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
+# --- END: MODIFIED SECTION FOR DEBUGGING ---
 
 # --- Flask Health Check Route ---
 @app.route('/ping')
@@ -1205,6 +1207,7 @@ def check_and_update_all_breakdown_statuses():
 
         for entry in symbol_entries:
             row, row_idx = entry["row"], entry["row"] - START_ROW_DATA
+            symbol_name = entry.get('symbol', 'Unknown') # For logging
 
             setups = [
                 {'name': 'Trailing Stop', 'input_col': TRAILING_STOP_INPUT_COL, 'status_col': TRAILING_STOP_STATUS_COL, 'is_multi_price': False, 'key': 'trailing_stop'},
