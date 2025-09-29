@@ -42,7 +42,7 @@ GOOGLE_SHEET_ID = '1cYBpsVKCbrYCZzrj8NAMEgUG4cXy5Q5r9BtQE1Cjmz0' # Google Sheets
 DASHBOARD_SHEET_NAME = 'Dashboard'
 ATH_CACHE_SHEET_NAME = 'ATH Cache'
 ORDERS_SHEET_NAME = 'Orders'
-APPS_SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyO0UNj-piGPTqxl1FwV3OBulqTjDE2zdXjh2aVTIRsekTlGQJB0Hy5JANfWn3pz8Fo/exec" # Apps Script Web App URL for Instant Triggers
+APPS_SCRIPT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycby40oa_gihCiVkxooq_6_jm-yyemFlAhb5W_bshsY1BwdQFnFJpiOtYKStwGcwZL1Fy/exec" # Apps Script Web App URL for Instant Triggers
 INSTRUMENT_LIST_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json" # Instrument master list URL
 instrument_master_list = []
 stock_name_cache = {} # Cache for full stock names from Yahoo Finance
@@ -69,7 +69,6 @@ volume_history_3pct = collections.defaultdict(lambda: collections.defaultdict(li
 support_candle_details = {} # NEW: Cache for storing precise support candle date and time.
 previous_day_high_cache = {}
 monthly_high_cache = {}
-v_column_cache = {} # NEW: Cache for the calculated V column indicator
 orh_triggered_today = set() # State Tracking: Stores tokens that have already triggered to prevent re-checking
 previous_j_column_state = {}
 sell_triggered_today = set()
@@ -491,121 +490,6 @@ def fetch_monthly_highs(smart_api_obj, tokens_to_fetch): # Fetches high of curre
         except Exception as e: logger.error(f"Exception fetching monthly data for token {token}: {e}")
         time.sleep(0.5)
 
-# --- START: NEW V-COLUMN LOGIC ---
-def calculate_hh_after_ll_indicator(smart_api_obj, token, exchange):
-    """
-    Calculates the HH-after-LL indicator for a given stock across Monthly, Weekly, and Daily timeframes.
-    Returns a formatted string for display and a month count for sorting.
-    """
-    try:
-        today = get_ist_time().date()
-        from_date = today - relativedelta(years=5)
-        historic_param = {
-            "exchange": exchange, "symboltoken": token, "interval": "ONE_DAY",
-            "fromdate": from_date.strftime("%Y-%m-%d %H:%M"), "todate": today.strftime("%Y-%m-%d %H:%M")
-        }
-        response = smart_api_obj.getCandleData(historic_param)
-        if not (response and response.get("status") and response.get("data")):
-            logger.warning(f"Could not fetch daily history for V-Column logic on token {token}.")
-            return "No Data", 999
-        
-        daily_candles = [{'date': datetime.datetime.fromisoformat(c[0]).date(), 'high': c[2], 'low': c[3]} for c in response["data"]]
-        
-        # --- Resample daily data into weekly and monthly ---
-        weekly_candles, monthly_candles = [], []
-        # Weekly resampling
-        if daily_candles:
-            current_week = []
-            for candle in daily_candles:
-                if not current_week or candle['date'].isocalendar()[1] == current_week[0]['date'].isocalendar()[1]:
-                    current_week.append(candle)
-                else:
-                    week_high = max(c['high'] for c in current_week)
-                    week_low = min(c['low'] for c in current_week)
-                    weekly_candles.append({'date': current_week[0]['date'], 'high': week_high, 'low': week_low})
-                    current_week = [candle]
-            if current_week: # Append the last week
-                weekly_candles.append({'date': current_week[0]['date'], 'high': max(c['high'] for c in current_week), 'low': min(c['low'] for c in current_week)})
-
-        # Monthly resampling
-        if daily_candles:
-            current_month = []
-            for candle in daily_candles:
-                if not current_month or candle['date'].month == current_month[0]['date'].month:
-                    current_month.append(candle)
-                else:
-                    month_high = max(c['high'] for c in current_month)
-                    month_low = min(c['low'] for c in current_month)
-                    monthly_candles.append({'date': current_month[0]['date'], 'high': month_high, 'low': month_low})
-                    current_month = [candle]
-            if current_month: # Append the last month
-                monthly_candles.append({'date': current_month[0]['date'], 'high': max(c['high'] for c in current_month), 'low': min(c['low'] for c in current_month)})
-
-        # --- Define pattern finder ---
-        def find_pattern_date(candles):
-            if len(candles) < 4: return None
-            
-            # Use only completed candles
-            last_candle_date = candles[-1]['date']
-            if isinstance(candles[0]['date'], datetime.date) and candles[0]['date'].day == 1: # Monthly
-                 completed_candles = [c for c in candles if c['date'].month != last_candle_date.month or c['date'].year != last_candle_date.year]
-            elif isinstance(candles[0]['date'], datetime.date) and len(candles) > 1 and (candles[1]['date'] - candles[0]['date']).days > 1 : # Weekly
-                completed_candles = [c for c in candles if c['date'].isocalendar()[:2] != last_candle_date.isocalendar()[:2]]
-            else: # Daily
-                completed_candles = [c for c in candles if c['date'] != last_candle_date]
-
-            if len(completed_candles) < 4: return None
-            
-            # Scan backwards for the pattern
-            for i in range(len(completed_candles) - 2, 1, -1):
-                # Find start of a Higher High streak
-                if completed_candles[i]['high'] > completed_candles[i-1]['high']:
-                    first_hh_candle = completed_candles[i]
-                    
-                    # Find end of the preceding Lower Low streak
-                    # The candle before the first HH must be the end of the previous trend
-                    end_of_ll_streak_idx = i - 1
-                    if end_of_ll_streak_idx > 0 and completed_candles[end_of_ll_streak_idx]['low'] < completed_candles[end_of_ll_streak_idx - 1]['low']:
-                         # Found the pattern: HH starts right after an LL
-                        return first_hh_candle['date']
-            return None
-        
-        # --- Analyze each timeframe ---
-        monthly_date = find_pattern_date(monthly_candles)
-        weekly_date = find_pattern_date(weekly_candles)
-        daily_date = find_pattern_date(daily_candles)
-
-        # --- Format the output string ---
-        def format_age(date_obj, unit):
-            if not date_obj: return f"N/A {unit}"
-            delta = relativedelta(today, date_obj)
-            if unit == 'Month':
-                count = delta.years * 12 + delta.months
-                return f"{count}{unit}"
-            elif unit == 'Week':
-                count = (today - date_obj).days // 7
-                return f"{count}{unit}s"
-            elif unit == 'day':
-                count = (today - date_obj).days
-                return f"{count}th {unit}"
-            return ""
-
-        month_str = format_age(monthly_date, "Month")
-        week_str = format_age(weekly_date, "Week")
-        day_str = format_age(daily_date, "day")
-        
-        final_string = f"{month_str}, {week_str}, {day_str}"
-        sort_key = 999 # Default for no pattern
-        if monthly_date:
-            delta = relativedelta(today, monthly_date)
-            sort_key = delta.years * 12 + delta.months
-            
-        return final_string, sort_key
-    except Exception as e:
-        logger.error(f"Error in V-Column calculation for token {token}: {e}")
-        return "Calc Error", 999
-# --- END: NEW V-COLUMN LOGIC ---
-
 # --- Hybrid ORH Logic ---
 def schedule_orh_check(token): # Schedules the historical ORH check to run after a delay.
     logger.info(f"[ORH EVENT] New 5-Min candle completed for token {token}. Scheduling automatic check.")
@@ -755,8 +639,7 @@ def check_and_update_price_volume_setups(): # MODIFIED: Checks for setups, forma
         Dashboard.batch_update(updates_queued, value_input_option='USER_ENTERED')
         logger.info(f"Applied {len(updates_queued)} Price/Volume setup updates to Dashboard and refreshed support cache.")
     else: logger.info("No Price/Volume setup updates were needed.")
-
-def check_and_update_all_breakdown_statuses(): # MODIFIED WITH DEBUGGING: Finds the *exact* 15-min candle that first breached any support level.
+def check_and_update_all_breakdown_statuses(): # MODIFIED: Finds the *exact* 15-min candle that first breached the support level for all setups.
     logger.info("Checking all breakdown statuses with precise candle-by-candle validation...")
     requests_queued = []
     RED_COLOR, dashboard_sheet_id = (254, 112, 112), Dashboard.id
@@ -783,18 +666,10 @@ def check_and_update_all_breakdown_statuses(): # MODIFIED WITH DEBUGGING: Finds 
         if not history_15min: continue
         for entry in symbol_entries:
             row, row_idx = entry["row"], entry["row"] - START_ROW_DATA
-            setups = [{'name': 'Highest Up Candle', 'status_col': HIGHEST_UP_CANDLE_STATUS_COL}, {'name': 'High Volume', 'status_col': HIGH_VOL_STATUS_COL}, {'name': '3% Down', 'status_col': PCT_DOWN_STATUS_COL}, {'name': 'Trailing Stop', 'input_col': TRAILING_STOP_INPUT_COL, 'status_col': TRAILING_STOP_STATUS_COL}]
+            setups = [{'name': 'Trailing Stop', 'input_col': TRAILING_STOP_INPUT_COL, 'status_col': TRAILING_STOP_STATUS_COL}, {'name': 'Highest Up Candle', 'status_col': HIGHEST_UP_CANDLE_STATUS_COL}, {'name': 'High Volume', 'status_col': HIGH_VOL_STATUS_COL}, {'name': '3% Down', 'status_col': PCT_DOWN_STATUS_COL}]
             for setup in setups:
                 current_status = get_sheet_value(row_idx, setup['status_col'])
                 first_breakdown_candle, new_status = None, ""
-                
-                # --- START DEBUG BLOCK ---
-                # Only log verbosely for the specific row and setup you mentioned
-                is_target_for_debug = (row == 48 and setup['name'] == 'Highest Up Candle')
-                if is_target_for_debug:
-                    logger.info(f"--- [DEBUG ROW {row}] --- Checking setup: '{setup['name']}' for symbol '{entry.get('symbol', 'N/A')}' ---")
-                # --- END DEBUG BLOCK ---
-
                 if 'input_col' in setup: # Logic for manual Trailing Stop
                     trigger_price_str = get_sheet_value(row_idx, setup['input_col'])
                     try: trigger_price = float(str(trigger_price_str).replace(',', '')) if trigger_price_str else None
@@ -807,47 +682,21 @@ def check_and_update_all_breakdown_statuses(): # MODIFIED WITH DEBUGGING: Finds 
                         if breakdown_candidates: first_breakdown_candle = min(breakdown_candidates, key=lambda c: c['start_time'])
                 else: # Logic for automated setups
                     support_levels = support_details_copy.get((row, setup['name']), [])
-                    
-                    if is_target_for_debug:
-                        logger.info(f"[DEBUG ROW {row}] Found {len(support_levels)} support level(s): {support_levels}")
-
                     if not support_levels:
                         if current_status.strip() != "": new_status = ""
                         else: continue
                     else:
-                        # --- START: REVISED LOGIC WITH DEBUGGING ---
-                        all_breakdown_candles = []
                         for level in support_levels:
                             support_price, support_time = level['price'], level['time']
-                            if is_target_for_debug:
-                                logger.info(f"[DEBUG ROW {row}] > Evaluating Level: Price={support_price:.2f}, Time={support_time.strftime('%Y-%m-%d %H:%M')}")
-                            
-                            for candle in history_15min:
-                                # Check if candle is after the support candle and its close is below the support price
-                                if candle['start_time'] > support_time and candle['close'] < support_price:
-                                    all_breakdown_candles.append(candle)
-                                    if is_target_for_debug:
-                                        logger.info(f"[DEBUG ROW {row}]   - Found a potential breakdown candle: Time={candle['start_time'].strftime('%Y-%m-%d %H:%M')}, Close={candle['close']:.2f} (Support was {support_price:.2f})")
-                        
-                        if all_breakdown_candles:
-                            # If we found any breakdown candles, get the one that happened first
-                            first_breakdown_candle = min(all_breakdown_candles, key=lambda c: c['start_time'])
-                            if is_target_for_debug:
-                                logger.info(f"[DEBUG ROW {row}]   >>> Total potential breakdowns found: {len(all_breakdown_candles)}. The earliest one is at {first_breakdown_candle['start_time'].strftime('%Y-%m-%d %H:%M')}.")
-                        elif is_target_for_debug:
-                            logger.info(f"[DEBUG ROW {row}]   >>> No breakdown candles found across all levels after checking the 15-min history.")
-                        # --- END: REVISED LOGIC WITH DEBUGGING ---
-                
+                            breakdown_candidates = [c for c in history_15min if c['start_time'] > support_time and c['close'] < support_price]
+                            if breakdown_candidates:
+                                earliest_breakdown = min(breakdown_candidates, key=lambda c: c['start_time'])
+                                if first_breakdown_candle is None or earliest_breakdown['start_time'] < first_breakdown_candle['start_time']:
+                                    first_breakdown_candle = earliest_breakdown
                 if first_breakdown_candle:
                     candle_close_time = first_breakdown_candle['start_time'] + timedelta(minutes=15)
                     new_status = f"Yes ({candle_close_time.strftime('%d %b, %I:%M %p')})"
-                    if is_target_for_debug:
-                         logger.info(f"[DEBUG ROW {row}] FINAL RESULT: Breakdown confirmed. New Status will be: '{new_status}'")
-                else:
-                    new_status = ""
-                    if is_target_for_debug:
-                        logger.info(f"[DEBUG ROW {row}] FINAL RESULT: No overall breakdown found for this setup. Status will be cleared.")
-
+                else: new_status = ""
                 if new_status.strip() != current_status.strip(): # Queue updates only if status has changed
                     cell_range = {"sheetId": dashboard_sheet_id, "startRowIndex": row - 1, "endRowIndex": row, "startColumnIndex": col_to_num(setup['status_col']) - 1, "endColumnIndex": col_to_num(setup['status_col'])}
                     bg_color = RED_COLOR if new_status.startswith("Yes") else None
@@ -857,8 +706,7 @@ def check_and_update_all_breakdown_statuses(): # MODIFIED WITH DEBUGGING: Finds 
     if requests_queued:
         gsheet.batch_update({'requests': requests_queued})
         logger.info(f"Applied {len(requests_queued)} precise breakdown status updates to Dashboard.")
-    else:
-        logger.info("No precise breakdown status updates were needed.")
+    else: logger.info("No precise breakdown status updates were needed.")
 # --- END: MODIFIED Breakdown Logic ---
 
 def check_and_update_breakdown_status(): # Checks for a change in breakdown status to trigger the "Sell" alert.
@@ -1137,6 +985,7 @@ def update_excel_live_data(): # Updates the Google Sheet with live data and Swin
                 if details.get("qty_col"): input_ranges.append(f'{details["qty_col"]}{row_num}')
                 if details.get("entry_date_col"): input_ranges.append(f'{details["entry_date_col"]}{row_num}')
                 if details.get("swing_low_input_col"): input_ranges.append(f'{details["swing_low_input_col"]}{row_num}')
+                input_ranges.append(f'{MONTH_SORT_COL}{row_num}')
     input_data = {}
     if input_ranges:
         try:
@@ -1214,6 +1063,12 @@ def update_excel_live_data(): # Updates the Google Sheet with live data and Swin
                         queue_update(details.get('percent_from_swing_low_col'), percent_from_high, "0.00%", bg_color=cell_color)
                     else: queue_update(details.get('percent_from_swing_low_col'), "No High", "@", bg_color=None)
                 else: queue_update(details.get('percent_from_swing_low_col'), "", "General", bg_color=None)
+                month_val_str = str(input_data.get(f'{MONTH_SORT_COL}{row_num}') or '')
+                try:
+                    month_val = int(month_val_str)
+                    cell_color = YELLOW_COLOR if month_val >= 3 else None
+                    queue_update(MONTH_SORT_COL, month_val, "0", bg_color=cell_color)
+                except (ValueError, TypeError): queue_update(MONTH_SORT_COL, month_val_str, "@", bg_color=None)
                 days_duration = ""
                 if entry_date_str:
                     try:
@@ -1352,90 +1207,41 @@ def run_initial_setup_data_fetch(initial_data_ready_event): # Background thread 
         logger.info("Initial data fetch is complete. Handing over to the scheduler for timed checks.")
     except Exception as e: logger.exception(f"An error occurred during initial data fetch: {e}")
     finally: initial_data_ready_event.set()
-def update_v_column_indicator_data(): # NEW: Periodically calculates the V-Column indicator for all relevant stocks.
-    logger.info("Starting periodic V-Column indicator calculation...")
-    with data_lock:
-        # We need tokens from the 'Full Positions' list, which are typically the same as the 3pct setup list.
-        details_copy = excel_3pct_setup_details.copy()
-    
-    for token, entries in details_copy.items():
-        if not entries: continue
-        try:
-            exchange = entries[0]['exchange']
-            text, sort_key = calculate_hh_after_ll_indicator(smart_api_obj, token, exchange)
-            with data_lock:
-                v_column_cache[token] = {'text': text, 'sort_key': sort_key}
-            logger.info(f"Updated V-Column cache for token {token}: {v_column_cache[token]}")
-        except Exception as e:
-            logger.error(f"Failed to update V-column cache for token {token}: {e}")
-        time.sleep(2) # To avoid hitting API rate limits
-    logger.info("Finished periodic V-Column indicator calculation.")
-def sort_full_positions(): # MODIFIED: Reads from cache, sorts, and writes back the Full Positions section.
+def sort_full_positions(): # Reads, sorts, and writes back the Full Positions section based on Columns W and Y.
     logger.info("Performing automatic sort of Full Positions...")
     try:
         last_row = get_last_row_in_column(Dashboard, FULL_SYMBOL_COL)
         if last_row < START_ROW_DATA:
             logger.info("No data in Full Positions to sort."); return
-        range_to_sort = f"{FULL_EXCHANGE_COL}{START_ROW_DATA}:{FULL_POSITIONS_END_COL}{last_row}"
-        token_range = f"{ATH_CACHE_Z_COL_DASH}{START_ROW_DATA}:{ATH_CACHE_Z_COL_DASH}{last_row}"
-        
-        dashboard_data = Dashboard.get(range_to_sort)
-        token_data_raw = ATHCache.get(token_range)
-        # Ensure token_data has the same number of rows as dashboard_data
-        token_data = (token_data_raw + [['']] * len(dashboard_data))[:len(dashboard_data)]
-
+        range_to_sort, token_range = f"{FULL_EXCHANGE_COL}{START_ROW_DATA}:{FULL_POSITIONS_END_COL}{last_row}", f"{ATH_CACHE_Z_COL_DASH}{START_ROW_DATA}:{ATH_CACHE_Z_COL_DASH}{last_row}"
+        dashboard_data, token_data = Dashboard.get(range_to_sort), ATHCache.get(token_range)
         combined_data = []
-        with data_lock: v_cache_copy = v_column_cache.copy()
-
+        month_col_index, swing_low_col_index = col_to_num(MONTH_SORT_COL) - col_to_num(FULL_EXCHANGE_COL), col_to_num(PERCENT_FROM_SWING_LOW_COL) - col_to_num(FULL_EXCHANGE_COL)
         for i, row_data in enumerate(dashboard_data):
-            token = token_data[i][0] if i < len(token_data) and token_data[i] else None
-            v_column_info = v_cache_copy.get(token, {'text': 'Calculating...', 'sort_key': 999})
-            
-            # Update the V column text in the row data before appending
-            v_col_index = col_to_num(MONTH_SORT_COL) - col_to_num(FULL_EXCHANGE_COL)
-            if len(row_data) > v_col_index:
-                row_data[v_col_index] = v_column_info['text']
-            else: # Pad the row if it's too short
-                row_data.extend([''] * (v_col_index - len(row_data) + 1))
-                row_data[v_col_index] = v_column_info['text']
-
-            combined_data.append({
-                'dashboard_row': row_data, 
-                'token_row': token_data[i],
-                'sort_key': v_column_info['sort_key'],
-                'original_index': i
-            })
-        
-        # Sort ascending by month count (more recent signals first)
-        sorted_combined_data = sorted(combined_data, key=lambda x: x['sort_key'])
-
+            def to_float(value, is_percent=False):
+                try:
+                    if is_percent: return float(str(value).strip().replace('%', ''))
+                    return float(value)
+                except (ValueError, TypeError): return -float('inf')
+            month_val = to_float(row_data[month_col_index]) if len(row_data) > month_col_index else -float('inf')
+            swing_low_pct_val = to_float(row_data[swing_low_col_index], is_percent=True) if len(row_data) > swing_low_col_index else -float('inf')
+            combined_data.append({'dashboard_row': row_data, 'token_row': token_data[i] if i < len(token_data) else [''], 'sort_month': month_val, 'sort_swing_low': swing_low_pct_val, 'original_index': i})
+        sorted_combined_data = sorted(combined_data, key=lambda x: (x['sort_month'], x['sort_swing_low']), reverse=True)
         if all(item['original_index'] == i for i, item in enumerate(sorted_combined_data)):
-            logger.info("No change in sort order. Updating V-Column text only.");
-            # Still need to update the V-column text even if sort order doesn't change
-            v_column_updates = []
-            for i, item in enumerate(sorted_combined_data):
-                row_num = START_ROW_DATA + i
-                v_column_updates.append({'range': f"{MONTH_SORT_COL}{row_num}", 'values': [[item['dashboard_row'][v_col_index]]]})
-            if v_column_updates:
-                Dashboard.batch_update(v_column_updates, value_input_option='USER_ENTERED')
-            return
-
+            logger.info("No change in sort order. Skipping sheet update."); return
         logger.info("Change in sort order detected. Updating Google Sheet.")
-        sorted_dashboard_data = [item['dashboard_row'] for item in sorted_combined_data]
-        sorted_token_data = [item['token_row'] for item in sorted_combined_data]
-        
+        sorted_dashboard_data, sorted_token_data = [item['dashboard_row'] for item in sorted_combined_data], [item['token_row'] for item in sorted_combined_data]
         Dashboard.update(range_to_sort, sorted_dashboard_data, value_input_option='USER_ENTERED')
         ATHCache.update(token_range, sorted_token_data, value_input_option='USER_ENTERED')
         logger.info("Successfully sorted and updated Full Positions on the Google Sheet.")
-    except Exception as e:
-        logger.exception(f"An error occurred during the automatic sorting process: {e}")
+    except Exception as e: logger.exception(f"An error occurred during the automatic sorting process: {e}")
 def run_background_task_scheduler(initial_data_ready_event): # Main scheduler for slower tasks like sheet scanning and trade setup checks.
     global subscribed_tokens, excel_dashboard_details, excel_orh_setup_details, excel_3pct_setup_details, previous_j_column_state, previous_ah_column_state, previous_breakdown_state
     logger.info("Background task scheduler thread started.")
     logger.info("Scheduler is waiting for initial data fetch to complete...")
     initial_data_ready_event.wait()
     logger.info("Initial data is ready. Scheduler is now running.")
-    last_checked_minute_15min, last_checked_minute_30min, last_checked_minute_1hr, last_scan_time, last_sort_time, last_monthly_high_fetch_time, last_v_column_update_time = None, None, None, 0, 0, 0, 0
+    last_checked_minute_15min, last_checked_minute_30min, last_checked_minute_1hr, last_scan_time, last_sort_time, last_monthly_high_fetch_time = None, None, None, 0, 0, 0
     try:
         j_values = Dashboard.get(f"{SETUP_LOG_COL}{START_ROW_DATA}:{SETUP_LOG_COL}{SETUP_MAX_ROW}")
         for i, cell in enumerate(j_values): previous_j_column_state[START_ROW_DATA + i] = cell[0] if cell else ""
@@ -1516,16 +1322,9 @@ def run_background_task_scheduler(initial_data_ready_event): # Main scheduler fo
                 with data_lock: unique_tokens_3pct = list(set([(token, details[0]['exchange_type']) for token, details in excel_3pct_setup_details.items() if details]))
                 if unique_tokens_3pct: fetch_monthly_highs(smart_api_obj, unique_tokens_3pct)
                 last_monthly_high_fetch_time = time.time()
-            
-            # --- MODIFIED: Schedule V-Column update and sorting ---
-            if time.time() - last_v_column_update_time > 86400: # Run once a day
-                threading.Thread(target=update_v_column_indicator_data, daemon=True).start()
-                last_v_column_update_time = time.time()
-
-            if time.time() - last_sort_time > 86400: # Run once a day
+            if time.time() - last_sort_time > 86400:
                 sort_full_positions()
                 last_sort_time = time.time()
-
             with data_lock: has_3pct_symbols, has_orh_symbols = bool(excel_3pct_setup_details), bool(excel_orh_setup_details)
             if has_3pct_symbols or has_orh_symbols:
                 with data_lock:
@@ -1642,12 +1441,9 @@ def start_main_application(): # Primary function to initialize connections and r
     logger.info("Performing initial symbol scan...")
     new_dashboard, new_orh, new_3pct, all_tokens_for_subscription = scan_sheet_for_all_symbols(Dashboard, ATHCache)
     excel_dashboard_details, excel_orh_setup_details, excel_3pct_setup_details = new_dashboard, new_orh, new_3pct
-    logger.info("Performing initial one-time fetch for monthly highs...")
+    logger.info("Performing initial one-time fetch for monthly highs and portfolio sort...")
     unique_tokens_3pct_startup = list(set([(token, details[0]['exchange_type']) for token, details in excel_3pct_setup_details.items() if details]))
     if unique_tokens_3pct_startup: fetch_monthly_highs(smart_api_obj, unique_tokens_3pct_startup)
-    # MODIFIED: Initial V-column calc and sort at startup
-    logger.info("Performing initial one-time V-Column calculation and portfolio sort...")
-    update_v_column_indicator_data()
     sort_full_positions()
     try:
         logger.info("Initializing SmartAPI WebSocket...")
@@ -1688,3 +1484,4 @@ def run_threaded_logic(): # Starts the main application logic in a separate thre
 if __name__ == "__main__": # Main entry point for Flask + Threaded Logic.
     run_threaded_logic()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
