@@ -1265,7 +1265,8 @@ def calculate_hh_ll_indicator(daily_candles):
     
     for timeframe, signal_date in [('monthly', last_monthly_signal_date), ('weekly', last_weekly_signal_date), ('daily', last_daily_signal_date)]:
         if signal_date:
-            delta = relativedelta(now, signal_date)
+            # FIX: Make the signal_date naive before comparison
+            delta = relativedelta(now, signal_date.replace(tzinfo=None))
             months = delta.years * 12 + delta.months
             remaining_days = delta.days
             weeks = remaining_days // 7
@@ -1353,9 +1354,9 @@ def run_daily_hh_ll_analysis_and_sort():
         if all(item['original_index'] == i for i, item in enumerate(sorted_combined_data)):
             logger.info("No change in sort order. Updating Column V values in place.")
             v_col_updates = []
-            v_col_idx_abs = col_to_num(MONTH_SORT_COL)
+            v_col_idx_in_row = col_to_num(MONTH_SORT_COL) - col_to_num(FULL_EXCHANGE_COL)
             for i, result in enumerate(sorted_combined_data):
-                 v_col_updates.append({'range': f"{MONTH_SORT_COL}{START_ROW_DATA + i}", 'values': [[result['dashboard_row'][v_col_idx_abs - col_to_num(FULL_EXCHANGE_COL)]]]})
+                 v_col_updates.append({'range': f"{MONTH_SORT_COL}{START_ROW_DATA + i}", 'values': [[result['dashboard_row'][v_col_idx_in_row]]]})
             if v_col_updates:
                 Dashboard.batch_update(v_col_updates, value_input_option='USER_ENTERED')
             return
@@ -1365,8 +1366,9 @@ def run_daily_hh_ll_analysis_and_sort():
         sorted_token_data = [item['token_row'] for item in sorted_combined_data]
 
         # 4. Write the sorted data back to the sheet
-        Dashboard.update(range_to_read, sorted_dashboard_data, value_input_option='USER_ENTERED')
-        ATHCache.update(token_range_to_read, sorted_token_data, value_input_option='USER_ENTERED')
+        # FIX: Use named arguments to avoid DeprecationWarning
+        Dashboard.update(range_name=range_to_read, values=sorted_dashboard_data, value_input_option='USER_ENTERED')
+        ATHCache.update(range_name=token_range_to_read, values=sorted_token_data, value_input_option='USER_ENTERED')
         logger.info("Successfully analyzed, sorted, and updated Full Positions on the Google Sheet.")
 
     except Exception as e:
@@ -1622,3 +1624,4 @@ def run_threaded_logic(): # Starts the main application logic in a separate thre
 if __name__ == "__main__": # Main entry point for Flask + Threaded Logic.
     run_threaded_logic()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
